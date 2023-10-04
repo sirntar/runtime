@@ -7,6 +7,7 @@
 
 #include "corerun.hpp"
 #include "dotenv.hpp"
+#include "json_parser.hpp"
 
 #include <fstream>
 
@@ -40,6 +41,12 @@ struct configuration
     // The full path to the Supplied managed entry assembly.
     string_t entry_assembly_fullpath;
 
+    // runtimeconfig.json path
+    string_t runtimeconfig_path;
+
+    // Flag whether to show log during runtimeconfig.json parsing
+    bool runtimeconfig_log;
+
     // Arguments to pass to managed entry assembly.
     int entry_assembly_argc;
     const char_t** entry_assembly_argv;
@@ -54,7 +61,7 @@ struct configuration
 
     // Perform self test.
     bool self_test;
-
+    
     // configured .env file to load
     dotenv dotenv_configuration;
 };
@@ -202,6 +209,54 @@ public:
     }
 };
 
+// Partial parser for runtimeconfig.json
+//
+// This is very simple parser that accepts only specific format of runtimeconfig.json that is produced by corefx tests build system:
+// {
+//   "runtimeOptions": {
+//     "tfm": AAA
+//     "rollForward": BBB
+//     "framework": {
+//       "name": "Microsoft.NETCore.App",
+//       "version": CCC
+//     },
+//     "configProperties": {
+//       "System.Reflection.Metadata.MetadataUpdater.IsSupported": DDD
+//     }
+//   }
+// }
+//
+// Notes:
+// - AAA/BBB/CCC can be anything, even not ending with comma or be a random set of characters, which will technically mean that this is not correct json.
+//   Yet, corefx tests build system will produce corect values for these strings, but we do not care about these values.
+// - DDD can be one of 16 variants:
+//     true
+//     true,
+//     false
+//     false,
+//     "true"
+//     "true",
+//     "false"
+//     "false",
+//     True
+//     False
+//     True,
+//     False,
+//     "True"
+//     "False"
+//     "True",
+//     "False",
+//   Again, this can technically be incorrect json if comma is before closing curly bracket.
+//   But, corefx tests build system will produce corect json.
+// - "tfm", "rollForward", "framework", "configProperties" and "runtimeOptions" can be skipped.
+// - All other variants are currently not supported (corerun will exit with error).
+// - This parser should not be used to verify correctness of json.
+// - Goal of this parser is only to handle what corefx tests build system produces and keep it simple instead of full json parser implementation.
+//   Yet, keeping the minimal correctness checks (for example, global "configProperties" should not set properties, and so on).
+//
+using runtimeconfig_parser_t = corefx_json::json_parser_t;
+using runtimeconfig_json_t = corefx_json::json_namespace_t;
+
 // The current CoreCLR instance details.
 static void* CurrentClrInstance;
 static unsigned int CurrentAppDomainId;
@@ -240,6 +295,153 @@ size_t HOST_CONTRACT_CALLTYPE get_runtime_property(
     return -1;
 }
 
+static const pal::char_t* get_arch()
+{
+#if defined(TARGET_AMD64)
+    return W("x64");
+#elif defined(TARGET_X86)
+    return W("x86");
+#elif defined(TARGET_ARM)
+    return W("arm");
+#elif defined(TARGET_ARM64)
+    return W("arm64");
+#elif defined(TARGET_RISCV64)
+    return W("riscv64");
+#else
+    return W("any");
+#endif
+}
+
+static pal::string_t trim_quotes(pal::string_t stringToCleanup)
+{
+    pal::char_t quote_array[2] = { '\"', '\'' };
+    for (size_t index = 0; index < sizeof(quote_array) / sizeof(quote_array[0]); index++)
+    {
+        size_t pos = stringToCleanup.find(quote_array[index]);
+        while (pos != std::string::npos)
+        {
+            stringToCleanup = stringToCleanup.erase(pos, 1);
+            pos = stringToCleanup.find(quote_array[index]);
+        }
+    }
+
+    return stringToCleanup;
+}
+
+static bool file_exists(const pal::string_t& path)
+{
+    return (::access(path.c_str(), F_OK) == 0);
+}
+
+static pal::string_t get_current_os_rid_platform()
+{
+    pal::string_t ridOS;
+    pal::string_t versionFile(W("/etc/os-release"));
+
+    if (file_exists(versionFile.c_str()))
+    {
+        // Read the file to get ID and VERSION_ID data that will be used
+        // to construct the RID.
+        FILE * fsVersionFile = ::fopen(versionFile.c_str(), "r");
+
+        // Proceed only if we were able to open the file
+        if (fsVersionFile)
+        {
+            pal::string_t strID(W("ID="));
+            pal::string_t valID;
+            pal::string_t strVersionID(W("VERSION_ID="));
+            pal::string_t valVersionID;
+
+            bool fFoundID = false, fFoundVersion = false;
+
+            char * cline = nullptr;
+            size_t len = 0;
+            ssize_t read = 0;
+
+            while ((read = getline(&cline, &len, fsVersionFile)) != -1)
+            {
+                // remove newline
+                if (read > 0 && cline[read - 1] == '\n')
+                {
+                    cline[read - 1] = '\0';
+                    read--;
+                }
+
+                pal::string_t line(cline);
+
+                // Look for ID if we have not found it already
+                if (!fFoundID)
+                {
+                    size_t pos = line.find(strID);
+                    if ((pos != std::string::npos) && (pos == 0))
+                    {
+                        valID.append(line.substr(3));
+                        fFoundID = true;
+                    }
+                }
+
+                // Look for VersionID if we have not found it already
+                if (!fFoundVersion)
+                {
+                    size_t pos = line.find(strVersionID);
+                    if ((pos != std::string::npos) && (pos == 0))
+                    {
+                        valVersionID.append(line.substr(11));
+                        fFoundVersion = true;
+                    }
+                }
+
+                if (fFoundID && fFoundVersion)
+                {
+                    // We have everything we need to form the RID - break out of the loop.
+                    break;
+                }
+            }
+
+            free(cline);
+
+            // Close the file now that we are done with it.
+            ::fclose(fsVersionFile);
+
+            if (fFoundID)
+            {
+                ridOS.append(valID);
+            }
+
+            if (fFoundVersion)
+            {
+                ridOS.append(W("."));
+                ridOS.append(valVersionID);
+            }
+
+            if (fFoundID || fFoundVersion)
+            {
+                // Remove any double-quotes
+                ridOS = trim_quotes(ridOS);
+            }
+        }
+    }
+
+    return ridOS;
+}
+
+static pal::string_t get_current_runtime_id()
+{
+    pal::string_t rid = pal::getenv(W("DOTNET_RUNTIME_ID"));
+    if (!rid.empty())
+        return rid;
+
+    rid = get_current_os_rid_platform();
+
+    if (!rid.empty())
+    {
+        rid.append(W("-"));
+        rid.append(get_arch());
+    }
+
+    return rid;
+}
+
 static int run(const configuration& config)
 {
     platform_specific_actions actions;
@@ -247,7 +449,7 @@ static int run(const configuration& config)
     // Check if debugger attach scenario was requested.
     if (config.wait_to_debug)
         wait_for_debugger();
-    
+
     config.dotenv_configuration.load_into_current_process();
     
     string_t exe_path = pal::get_exe_path();
@@ -259,6 +461,12 @@ static int run(const configuration& config)
         pal::split_path_to_dir_filename(config.entry_assembly_fullpath, app_path, file);
         pal::ensure_trailing_delimiter(app_path);
     }
+
+    // Define the NI app_path.
+    string_t app_path_ni = app_path + W("NI");
+    pal::ensure_trailing_delimiter(app_path_ni);
+    app_path_ni.append(1, pal::env_path_delim);
+    app_path_ni.append(app_path);
 
     // Accumulate path for native search path.
     pal::stringstream_t native_search_dirs;
@@ -332,6 +540,7 @@ static int run(const configuration& config)
     // Construct CoreCLR properties.
     pal::string_utf8_t tpa_list_utf8 = pal::convert_to_utf8(tpa_list.c_str());
     pal::string_utf8_t app_path_utf8 = pal::convert_to_utf8(app_path.c_str());
+    pal::string_utf8_t app_path_ni_utf8 = pal::convert_to_utf8(app_path_ni.c_str());
     pal::string_utf8_t native_search_dirs_utf8 = pal::convert_to_utf8(native_search_dirs.str().c_str());
 
     std::vector<pal::string_utf8_t> user_defined_keys_utf8;
@@ -340,6 +549,53 @@ static int run(const configuration& config)
         user_defined_keys_utf8.push_back(pal::convert_to_utf8(str.c_str()));
     for (const string_t& str : config.user_defined_values)
         user_defined_values_utf8.push_back(pal::convert_to_utf8(str.c_str()));
+
+    if (!config.runtimeconfig_path.empty())
+    {
+        runtimeconfig_parser_t parser;
+        string_t runtimeconfig_dev_path;
+
+        size_t pos = config.runtimeconfig_path.find(".runtimeconfig.json");
+        if (pos != std::string::npos)
+        {
+            runtimeconfig_dev_path = config.runtimeconfig_path.substr(0, pos) + ".runtimeconfig.dev.json";
+        }
+
+        pal::fprintf(stderr, "\033[46;97m corerun: [@run][$files] %s | %s \033[0m\n", 
+            runtimeconfig_dev_path.c_str(), config.runtimeconfig_path.c_str());
+
+        if (!runtimeconfig_dev_path.empty())
+        {
+            // parse dev config with configProperties
+            parser.parse_file(runtimeconfig_dev_path);
+
+            std::shared_ptr<runtimeconfig_json_t> runtimeconfig_json = parser["global.runtimeOptions.configProperties"];
+
+            user_defined_keys_utf8.insert(user_defined_keys_utf8.end(), 
+                runtimeconfig_json->keys_begin(), runtimeconfig_json->keys_end());
+            user_defined_values_utf8.insert(user_defined_values_utf8.end(), 
+                runtimeconfig_json->values_begin(), runtimeconfig_json->values_end());
+            parser.clear();
+        }
+
+        // parse config with configProperties
+        parser.parse_file(config.runtimeconfig_path);
+
+        std::shared_ptr<runtimeconfig_json_t> runtimeconfig_json = parser["global.runtimeOptions.configProperties"];
+
+        //  DEBUG_PRINT
+        for (size_t i = 0; i < runtimeconfig_json->size(); i++)
+        {
+            pal::fprintf(stderr, "\033[46;97m corerun: [@run] %s : %s \033[0m\n", 
+                runtimeconfig_json->key_at(i).c_str(), runtimeconfig_json->at(i).c_str());
+        }
+
+        user_defined_keys_utf8.insert(user_defined_keys_utf8.end(), 
+            runtimeconfig_json->keys_begin(), runtimeconfig_json->keys_end());
+        user_defined_values_utf8.insert(user_defined_values_utf8.end(), 
+            runtimeconfig_json->values_begin(), runtimeconfig_json->values_end());
+        parser.clear();
+    }
 
     // Set base initialization properties.
     std::vector<const char*> propertyKeys;
@@ -355,10 +611,29 @@ static int run(const configuration& config)
     propertyKeys.push_back("APP_PATHS");
     propertyValues.push_back(app_path_utf8.c_str());
 
+    // APP_NI_PATHS
+    // - The list of additional paths that the assembly loader will probe for ngen images
+    propertyKeys.push_back("APP_NI_PATHS");
+    propertyValues.push_back(app_path_ni_utf8.c_str());
+
     // NATIVE_DLL_SEARCH_DIRECTORIES
     // - The list of paths that will be probed for native DLLs called by PInvoke
     propertyKeys.push_back("NATIVE_DLL_SEARCH_DIRECTORIES");
     propertyValues.push_back(native_search_dirs_utf8.c_str());
+
+    // RUNTIME_IDENTIFIER
+    // - RID of platfrom on which corerun is launched
+    //
+    // Note:
+    //   corerun is used to run corefx tests instead of dotnet, because dotnet is not available for Tizen.
+    //   dotnet provides RUNTIME_IDENTIFIER that later defines RuntimeInformation.RuntimeIdentifier.
+    //   we need to maintain same behavior (at least for few corefx tests) with corerun.
+    pal::string_t rid = get_current_runtime_id();
+    if (!rid.empty())
+    {
+        propertyKeys.push_back("RUNTIME_IDENTIFIER");
+        propertyValues.push_back(rid.c_str());
+    }
 
     // Sanity check before adding user-defined properties
     assert(propertyKeys.size() == propertyValues.size());
@@ -474,6 +749,11 @@ static void display_usage()
         W("                   May be supplied multiple times. Format: <key>=<value>.\n")
         W("  -d, --debug - causes corerun to wait for a debugger to attach before executing.\n")
         W("  -e, --env - path to a .env file with environment variables that corerun should set.\n")
+        W("  --runtimeconfig - path to runtimeconfig.json file.\n")
+        W("                    Note: parser is limited to what corefx tests build system generates.\n")
+        W("                    corerun will exit if unsupported format of line is met.\n")
+        W("                    Note: runtimeconfig.dev.json is also searched and parsed if found.\n")
+        W("  --runtimeconfig-log - show info about parsed runtimeconfig.json.\n")
         W("  -?, -h, --help - show this help.\n")
         W("\n")
         W("The runtime binary is searched for in --clr-path, CORE_ROOT environment variable, then\n")
@@ -506,6 +786,11 @@ static bool parse_args(
         // First argument that is not an option is the managed assembly to execute.
         if (!is_option)
         {
+            if (pal::strcmp(argv[i], W("exec")) == 0)
+            {
+                continue;
+            }
+
             config.entry_assembly_fullpath = pal::get_absolute_path(argv[i]);
             i++; // Move to next argument.
 
@@ -595,6 +880,34 @@ static bool parse_args(
             display_usage();
             break;
         }
+        // corerun is used to run corefx tests instead of dotnet, because dotnet is not available for Tizen.
+        // dotnet-specific arguments (which are not handled) need to be skipped,
+        // because Microsoft.DotNet.RemoteExecutor tries to execute binary that it gets from /proc/self/maps.
+        //
+        // runtimeconfig.json with test-specific setup is passed to corerun and we need to handle it
+        else if (pal::strcmp(option, W("runtimeconfig")) == 0)
+        {
+            i++;
+            if (i < argc)
+            {
+                config.runtimeconfig_path = argv[i];
+            }
+            else
+            {
+                pal::fprintf(stderr, W("Option %s: missing path\n"), arg);
+                break;
+            }
+        }
+        else if (pal::strcmp(option, W("runtimeconfig-log")) == 0)
+        {
+            config.runtimeconfig_log = true;
+        }
+        // ignored dotnet argument
+        else if (pal::strcmp(option, W("depsfile")) == 0)
+        {
+            i++;
+            continue;
+        }
         else
         {
             pal::fprintf(stderr, W("Unknown option %s\n"), arg);
@@ -614,6 +927,9 @@ static int self_test();
 
 int MAIN(const int argc, const char_t* argv[])
 {
+    //  DEBUG_PRINT
+    pal::fprintf(stderr, W("\033[46;97m corerun: [@MAIN] arch = %s \033[0m\n"), get_arch());
+
     configuration config{};
     if (!parse_args(argc, argv, config))
         return EXIT_FAILURE;
@@ -696,6 +1012,21 @@ static int self_test()
             THROW_IF_FALSE(parse_args(6, args, config));
             THROW_IF_FALSE(config.user_defined_keys.size() == 2);
             THROW_IF_FALSE(config.user_defined_values.size() == 2);
+            THROW_IF_FALSE(!config.entry_assembly_fullpath.empty());
+        }
+        {
+            configuration config{};
+            const char_t* args[] = { W(""), W("--runtimeconfig"), W("path"), W("foo") };
+            THROW_IF_FALSE(parse_args(4, args, config));
+            THROW_IF_FALSE(config.runtimeconfig_path == W("path"));
+            THROW_IF_FALSE(!config.entry_assembly_fullpath.empty());
+        }
+        {
+            configuration config{};
+            const char_t* args[] = { W(""), W("--runtimeconfig"), W("path"), W("--runtimeconfig-log"), W("foo") };
+            THROW_IF_FALSE(parse_args(5, args, config));
+            THROW_IF_FALSE(config.runtimeconfig_path == W("path"));
+            THROW_IF_FALSE(config.runtimeconfig_log);
             THROW_IF_FALSE(!config.entry_assembly_fullpath.empty());
         }
         {
