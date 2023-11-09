@@ -19,6 +19,7 @@ XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 #pragma hdrstop
 #endif
 
+#define TARGET_RISCV64
 #ifdef TARGET_RISCV64 // This file is ONLY used for RISCV64 architectures
 
 #include "jit.h"
@@ -71,12 +72,14 @@ bool Lowering::IsContainableImmed(GenTree* parentNode, GenTree* childNode) const
             case GT_LE:
             case GT_GE:
             case GT_GT:
+            case GT_BOUNDS_CHECK:
                 return emitter::isValidSimm12(immVal);
             case GT_AND:
             case GT_OR:
             case GT_XOR:
                 return emitter::isValidUimm11(immVal);
             case GT_JCMP:
+                assert(immVal == 0);
                 return true;
 
             case GT_STORE_LCL_FLD:
