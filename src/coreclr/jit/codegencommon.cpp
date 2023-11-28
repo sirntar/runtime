@@ -5857,6 +5857,13 @@ void CodeGen::genFnProlog()
     {
         initReg = REG_SCRATCH;
     }
+#elif defined(TARGET_RISCV64)
+    // For RISC-V64 OSR root frames, we may need a scratch register for large
+    // offset addresses. Use a register that won't be allocated.
+    if (isRoot && compiler->opts.IsOSR())
+    {
+        initReg = REG_SCRATCH; // REG_T0
+    }
 #endif
 
 #ifndef TARGET_LOONGARCH64
