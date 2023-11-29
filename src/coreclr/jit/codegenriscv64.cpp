@@ -20,6 +20,7 @@ XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 #include "lower.h"
 #include "gcinfo.h"
 #include "gcinfoencoder.h"
+#include "patchpointinfo.h"
 
 bool CodeGen::genInstrWithConstant(instruction ins,
                                    emitAttr    attr,
@@ -148,7 +149,7 @@ void CodeGen::genPrologSaveRegPair(regNumber reg1,
 
     if (spDelta != 0)
     {
-        // generate addi.d SP,SP,-imm
+        // generate addi SP,SP,-imm
         genStackPointerAdjustment(spDelta, tmpReg, pTmpRegIsZero, /* reportUnwindData */ true);
 
         assert((spDelta + spOffset + 16) <= 0);
@@ -177,7 +178,7 @@ void CodeGen::genPrologSaveReg(regNumber reg1, int spOffset, int spDelta, regNum
 
     if (spDelta != 0)
     {
-        // generate daddiu SP,SP,-imm
+        // generate addi SP,SP,-imm
         genStackPointerAdjustment(spDelta, tmpReg, pTmpRegIsZero, /* reportUnwindData */ true);
     }
 
@@ -209,20 +210,24 @@ void CodeGen::genEpilogRestoreRegPair(regNumber reg1,
     {
         assert(!useSaveNextPair);
 
+        // ld reg2, (offset + 8)(SP)
         GetEmitter()->emitIns_R_R_I(ins, EA_PTRSIZE, reg2, REG_SPBASE, spOffset + 8);
         compiler->unwindSaveReg(reg2, spOffset + 8);
 
+        // ld reg1, offset(SP)
         GetEmitter()->emitIns_R_R_I(ins, EA_PTRSIZE, reg1, REG_SPBASE, spOffset);
         compiler->unwindSaveReg(reg1, spOffset);
 
-        // generate daddiu SP,SP,imm
+        // generate addi SP,SP,imm
         genStackPointerAdjustment(spDelta, tmpReg, pTmpRegIsZero, /* reportUnwindData */ true);
     }
     else
     {
+        // ld reg2, (offset + 8)(SP)
         GetEmitter()->emitIns_R_R_I(ins, EA_PTRSIZE, reg2, REG_SPBASE, spOffset + 8);
         compiler->unwindSaveReg(reg2, spOffset + 8);
 
+        // ld reg1, offset(SP)
         GetEmitter()->emitIns_R_R_I(ins, EA_PTRSIZE, reg1, REG_SPBASE, spOffset);
         compiler->unwindSaveReg(reg1, spOffset);
     }
@@ -246,11 +251,12 @@ void CodeGen::genEpilogRestoreReg(regNumber reg1, int spOffset, int spDelta, reg
         GetEmitter()->emitIns_R_R_I(ins, EA_PTRSIZE, reg1, REG_SPBASE, spOffset);
         compiler->unwindSaveReg(reg1, spOffset);
 
-        // generate add SP,SP,imm
+        // generate addi SP,SP,imm
         genStackPointerAdjustment(spDelta, tmpReg, pTmpRegIsZero, /* reportUnwindData */ true);
     }
     else
     {
+        // ld reg1 offset(SP)
         GetEmitter()->emitIns_R_R_I(ins, EA_PTRSIZE, reg1, REG_SPBASE, spOffset);
         compiler->unwindSaveReg(reg1, spOffset);
     }
