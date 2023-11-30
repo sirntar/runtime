@@ -89,6 +89,7 @@ bool CodeGen::genInstrWithConstant(instruction ins,
 
         if (ins == INS_addi)
         {
+            // TODO: check whether it is necessary; can't I just use addi?
             GetEmitter()->emitIns_R_R_R(INS_add, attr, reg1, reg2, tmpReg);
         }
         else
@@ -102,8 +103,8 @@ bool CodeGen::genInstrWithConstant(instruction ins,
 
 void CodeGen::genStackPointerAdjustment(ssize_t spDelta, regNumber tmpReg, bool* pTmpRegIsZero, bool reportUnwindData)
 {
-    // Even though INS_addi is specified here, the encoder will choose either
-    // an INS_add_d or an INS_addi_d and encode the immediate as a positive value
+    // TODO: check whether it is necessary
+    // Even though INS_addi is specified here, the encoder will replace it with INS_add
     //
     bool wasTempRegisterUsedForImm =
         !genInstrWithConstant(INS_addi, EA_PTRSIZE, REG_SPBASE, REG_SPBASE, spDelta, tmpReg, true);
@@ -501,6 +502,8 @@ void CodeGen::genRestoreCalleeSavedRegistersHelp(regMaskTP regsToRestoreMask, in
     }
 }
 
+// clang-format off
+
 // clang-format on
 
 void CodeGen::genFuncletProlog(BasicBlock* block)
@@ -519,15 +522,10 @@ void CodeGen::genFuncletProlog(BasicBlock* block)
 
     compiler->unwindBegProlog();
 
-    regMaskTP maskSaveRegsFloat = genFuncletInfo.fiSaveRegs & RBM_ALLFLOAT;
-    regMaskTP maskSaveRegsInt   = genFuncletInfo.fiSaveRegs & ~maskSaveRegsFloat;
-
-    // Funclets must always save RA and FP, since when we have funclets we must have an FP frame.
-    assert((maskSaveRegsInt & RBM_RA) != 0);
-    assert((maskSaveRegsInt & RBM_FP) != 0);
-
     bool isFilter  = (block->bbCatchTyp == BBCT_FILTER);
-    int  frameSize = genFuncletInfo.fiSpDelta1;
+    int  frameSize = genFuncletInfo.fiSpDelta;
+
+    assert(frameSize < 0);
 
     regMaskTP maskArgRegsLiveIn;
     if (isFilter)
@@ -543,62 +541,58 @@ void CodeGen::genFuncletProlog(BasicBlock* block)
         maskArgRegsLiveIn = RBM_A0;
     }
 
-#ifdef DEBUG
-    if (compiler->opts.disAsm)
+    // s1 is the first calee-safe register
+    regMaskTP maskSaveRegs  = genFuncletInfo.fiSaveRegs & RBM_CALLEE_SAVED;
+    int       regsSavedSize = (compiler->compCalleeRegsPushed - 2) << 3;
+
+    int offset  = genFuncletInfo.fiSP_to_CalleeSaved_delta;
+    int padding = genFuncletInfo.fiCalleeSavedPadding;
+
+    assert(offset > 0);
+    assert(padding > 0);
+
+    regNumber tempReg = rsGetRsvdReg();
+
+    if (offset + regsSavedSize + padding <= 2040)
     {
-        printf("DEBUG: CodeGen::genFuncletProlog, frameType:%d\n\n", genFuncletInfo.fiFrameType);
-    }
-#endif
+        offset += padding;
 
-    int offset = 0;
-    if (genFuncletInfo.fiFrameType == 1)
-    {
-        // fiFrameType constraints:
-        assert(frameSize < 0);
-        assert(frameSize >= -2048);
+        // addi sp, sp, #frameSize
+        genStackPointerAdjustment(frameSize, tempReg, nullptr, /* reportUnwindData */ true);
 
-        assert(genFuncletInfo.fiSP_to_FPRA_save_delta < 2040);
-        genStackPointerAdjustment(frameSize, rsGetRsvdReg(), nullptr, /* reportUnwindData */ true);
+        genSaveCalleeSavedRegistersHelp(maskSaveRegs, offset, 0);
+        offset += regsSavedSize;
 
-        GetEmitter()->emitIns_R_R_I(INS_sd, EA_PTRSIZE, REG_FP, REG_SPBASE, genFuncletInfo.fiSP_to_FPRA_save_delta);
-        compiler->unwindSaveReg(REG_FP, genFuncletInfo.fiSP_to_FPRA_save_delta);
+        // sd ra, #offset(sp)
+        GetEmitter()->emitIns_R_R_I(INS_sd, EA_PTRSIZE, REG_RA, REG_SPBASE, offset);
+        compiler->unwindSaveReg(REG_RA, offset);
 
-        GetEmitter()->emitIns_R_R_I(INS_sd, EA_PTRSIZE, REG_RA, REG_SPBASE, genFuncletInfo.fiSP_to_FPRA_save_delta + 8);
-        compiler->unwindSaveReg(REG_RA, genFuncletInfo.fiSP_to_FPRA_save_delta + 8);
-
-        maskSaveRegsInt &= ~(RBM_RA | RBM_FP); // We've saved these now
-
-        genSaveCalleeSavedRegistersHelp(maskSaveRegsInt | maskSaveRegsFloat, genFuncletInfo.fiSP_to_PSP_slot_delta + 8,
-                                        0);
-    }
-    else if (genFuncletInfo.fiFrameType == 2)
-    {
-        // fiFrameType constraints:
-        assert(frameSize < -2048);
-
-        offset      = -frameSize - genFuncletInfo.fiSP_to_FPRA_save_delta;
-        int spDelta = roundUp((UINT)offset, STACK_ALIGN);
-        offset      = spDelta - offset;
-
-        genStackPointerAdjustment(-spDelta, rsGetRsvdReg(), nullptr, /* reportUnwindData */ true);
-
-        GetEmitter()->emitIns_R_R_I(INS_sd, EA_PTRSIZE, REG_FP, REG_SPBASE, offset);
-        compiler->unwindSaveReg(REG_FP, offset);
-
-        GetEmitter()->emitIns_R_R_I(INS_sd, EA_PTRSIZE, REG_RA, REG_SPBASE, offset + 8);
-        compiler->unwindSaveReg(REG_RA, offset + 8);
-
-        maskSaveRegsInt &= ~(RBM_RA | RBM_FP); // We've saved these now
-
-        offset = frameSize + spDelta + genFuncletInfo.fiSP_to_PSP_slot_delta + 8;
-        genSaveCalleeSavedRegistersHelp(maskSaveRegsInt | maskSaveRegsFloat, offset, 0);
-
-        genStackPointerAdjustment(frameSize + spDelta, rsGetRsvdReg(), nullptr,
-                                  /* reportUnwindData */ true);
+        // sd fp, #(offset+8)(sp)
+        GetEmitter()->emitIns_R_R_I(INS_sd, EA_PTRSIZE, REG_FP, REG_SPBASE, offset + 8);
+        compiler->unwindSaveReg(REG_FP, offset + 8);
     }
     else
     {
-        unreached();
+        assert(frameSize < -2040);
+
+        int spDelta = frameSize + offset;
+
+        // addi sp, sp, #spDelta
+        genStackPointerAdjustment(spDelta, tempReg, nullptr, /* reportUnwindData */ true);
+
+        genSaveCalleeSavedRegistersHelp(maskSaveRegs, padding, 0);
+        regsSavedSize += padding;
+
+        // sd ra, #regsSavedSize(sp)
+        GetEmitter()->emitIns_R_R_I(INS_sd, EA_PTRSIZE, REG_RA, REG_SPBASE, regsSavedSize);
+        compiler->unwindSaveReg(REG_RA, regsSavedSize);
+
+        // sd fp, #(regsSavedSize+8)(sp)
+        GetEmitter()->emitIns_R_R_I(INS_sd, EA_PTRSIZE, REG_FP, REG_SPBASE, regsSavedSize + 8);
+        compiler->unwindSaveReg(REG_FP, regsSavedSize + 8);
+
+        // addi sp, sp -#offset
+        genStackPointerAdjustment(-offset, tempReg, nullptr, /* reportUnwindData */ true);
     }
 
     // This is the end of the OS-reported prolog for purposes of unwinding
