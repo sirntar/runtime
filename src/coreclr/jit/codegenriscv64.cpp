@@ -2435,6 +2435,27 @@ void CodeGen::genCodeForInitBlkUnroll(GenTreeBlk* node)
     }
 }
 
+// Generate code for CpObj nodes which copy structs that have interleaved
+// GC pointers.
+// For this case we'll generate a sequence of loads/stores in the case of struct
+// slots that don't contain GC pointers.  The generated code will look like:
+// ld tempReg, 8(a5)
+// sd tempReg, 8(a6)
+//
+// In the case of a GC-Pointer we'll call the ByRef write barrier helper
+// who happens to use the same registers as the previous call to maintain
+// the same register requirements and register killsets:
+// call CORINFO_HELP_ASSIGN_BYREF
+//
+// So finally an example would look like this:
+// ld tempReg, 8(a5)
+// sd tempReg 8(a6)
+// call CORINFO_HELP_ASSIGN_BYREF
+// ld tempReg, 8(a5)
+// sd tempReg, 8(a6)
+// call CORINFO_HELP_ASSIGN_BYREF
+// ld tempReg, 8(a5)
+// sd tempReg, 8(a6)
 void CodeGen::genCodeForCpObj(GenTreeBlk* cpObjNode)
 {
     GenTree*  dstAddr       = cpObjNode->Addr();
