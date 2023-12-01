@@ -1075,12 +1075,18 @@ void CodeGen::genSetPSPSym(regNumber initReg, bool* pInitRegZeroed)
 
     int spToCallerSpDelta = -genCallerSPtoInitialSPdelta();
 
+    if (compiler->opts.IsOSR())
+    {
+        SPtoCallerSPdelta += compiler->info.compPatchpointInfo->TotalFrameSize();
+    }
+
+
     // We will just use the initReg since it is an available register
     // and we are probably done using it anyway...
     regNumber regTmp = initReg;
     *pInitRegZeroed  = false;
 
-    genInstrWithConstant(INS_addi, EA_PTRSIZE, regTmp, REG_SPBASE, spToCallerSpDelta, rsGetRsvdReg(), false);
+    genInstrWithConstant(INS_addi, EA_PTRSIZE, regTmp, REG_SPBASE, spToCallerSpDelta, regTmp, false);
     GetEmitter()->emitIns_S_R(INS_sd, EA_PTRSIZE, regTmp, compiler->lvaPSPSym, 0);
 }
 
