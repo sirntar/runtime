@@ -158,9 +158,11 @@ void CodeGen::genPrologSaveRegPair(regNumber reg1,
         assert(spOffset <= 2031); // 2047-16
     }
 
+    // sd reg1, #spOffset(sp)
     GetEmitter()->emitIns_R_R_I(ins, EA_PTRSIZE, reg1, REG_SPBASE, spOffset);
     compiler->unwindSaveReg(reg1, spOffset);
 
+    // sd reg2, #(spOffset + 8)(sp)
     GetEmitter()->emitIns_R_R_I(ins, EA_PTRSIZE, reg2, REG_SPBASE, spOffset + 8);
     compiler->unwindSaveReg(reg2, spOffset + 8);
 }
@@ -183,6 +185,7 @@ void CodeGen::genPrologSaveReg(regNumber reg1, int spOffset, int spDelta, regNum
         genStackPointerAdjustment(spDelta, tmpReg, pTmpRegIsZero, /* reportUnwindData */ true);
     }
 
+    // sd reg1, #spOffset(sp)
     GetEmitter()->emitIns_R_R_I(ins, EA_PTRSIZE, reg1, REG_SPBASE, spOffset);
     compiler->unwindSaveReg(reg1, spOffset);
 }
@@ -393,6 +396,7 @@ void CodeGen::genSaveCalleeSavedRegistersHelp(regMaskTP regsToSaveMask, int lowe
         {
             // Currently this is the case for varargs only
             // whose size is MAX_REG_ARG * REGSIZE_BYTES = 64 bytes.
+            // addi sp, sp, #spDelta
             genStackPointerAdjustment(spDelta, rsGetRsvdReg(), nullptr, /* reportUnwindData */ true);
         }
         return;
@@ -403,7 +407,6 @@ void CodeGen::genSaveCalleeSavedRegistersHelp(regMaskTP regsToSaveMask, int lowe
     assert(regsToSaveCount <= genCountBits(RBM_CALLEE_SAVED));
 
     // Save integer registers at higher addresses than floating-point registers.
-
     regMaskTP maskSaveRegsFloat = regsToSaveMask & RBM_ALLFLOAT;
     regMaskTP maskSaveRegsInt   = regsToSaveMask & ~maskSaveRegsFloat;
 
@@ -503,7 +506,72 @@ void CodeGen::genRestoreCalleeSavedRegistersHelp(regMaskTP regsToRestoreMask, in
 }
 
 // clang-format off
-
+/*****************************************************************************
+ * 
+ *  Generates code for an EH funclet prolog.
+ * 
+ *  Funclets have the following incoming arguments:
+ * 
+ *      catch:          a0 = the exception object that was caught (see GT_CATCH_ARG)
+ *      filter:         a0 = the exception object to filter (see GT_CATCH_ARG), a1 = CallerSP of the containing function
+ *      finally/fault:  none
+ *
+ *  Funclets set the following registers on exit:
+ *
+ *     catch:          a0 = the address at which execution should resume (see BBJ_EHCATCHRET)
+ *     filter:         a0 = non-zero if the handler should handle the exception, zero otherwise (see GT_RETFILT)
+ *     finally/fault:  none
+ * 
+ *  The RISC-V64 funclet prolog is the following (Note: #framesz is total funclet frame size,
+ *  including everything; #outsz is outgoing argument space. #framesz must be a multiple of 16):
+ * 
+ *  Frame type liking:
+ *     addi sp, sp, -#framesz    ; establish the frame
+ *     sd s1, #outsz(sp)         ; save callee-saved registers, as necessary
+ *     sd s2, #(outsz+8)(sp)
+ *     sd ra, #(outsz+?)(sp)     ; save RA (8 bytes)
+ *     sd fp, #(outsz+?+8)(sp)   ; save FP (8 bytes)
+ *
+ *  The funclet frame layout:
+ *
+ *      |                       |
+ *      |-----------------------|
+ *      |  incoming arguments   |
+ *      +=======================+ <---- Caller's SP
+ *      |      OSR padding      | // If required
+ *      |-----------------------|
+ *      |  Varargs regs space   | // Only for varargs main functions; 64 bytes
+ *      |-----------------------|
+ *      |    MonitorAcquired    | // 8 bytes; for synchronized methods
+ *      |-----------------------|
+ *      |        PSP slot       | // 8 bytes (omitted in NativeAOT ABI)
+ *      |-----------------------|
+ *      ~  alignment padding    ~ // To make the whole frame 16 byte aligned
+ *      |-----------------------|
+ *      |      Saved RA, FP     | // 16 bytes
+ *      |-----------------------|
+ *      |Callee saved registers | // multiple of 8 bytes, not includting RA/FP
+ *      |-----------------------|
+ *      |   Outgoing arg space  | // multiple of 8 bytes; if required (i.e., #outsz != 0)
+ *      |-----------------------| <---- Ambient SP
+ *      |       |               |
+ *      ~       | Stack grows   ~
+ *      |       | downward      |
+ *              V
+ *
+ * Note, that SP only change once. That means, there will be a maximum of one alignment slot needed.
+ * Also remember, the stack oiubter needs to be 16 byte aligned at all times. 
+ * The size of the PSP slot plus callee-saved registers space is a maximum of 280 bytes:
+ *
+ *     RA,FP registers
+ *     11 int callee-saved register s1-s11
+ *     12 float callee-saved registers f8-f9, f18-f27
+ *     8 saved integer argument registers a0-a7, if varargs function support.
+ *     1 PSP slot
+ *     1 alignment slot or monitor acquired slot
+ *     == 35 slots * 8 bytes = 280 bytes.
+ *
+ */
 // clang-format on
 
 void CodeGen::genFuncletProlog(BasicBlock* block)
