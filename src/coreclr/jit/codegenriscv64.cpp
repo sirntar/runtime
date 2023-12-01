@@ -809,87 +809,88 @@ void CodeGen::genCaptureFuncletPrologEpilogInfo()
     // The frame size and offsets must be finalized
     assert(compiler->lvaDoneFrameLayout == Compiler::FINAL_FRAME_LAYOUT);
 
-    genFuncletInfo.fiFunction_CallerSP_to_FP_delta = genCallerSPtoFPdelta();
-
     regMaskTP rsMaskSaveRegs = regSet.rsMaskCalleeSaved;
     assert((rsMaskSaveRegs & RBM_RA) != 0);
     assert((rsMaskSaveRegs & RBM_FP) != 0);
 
     unsigned pspSize = (compiler->lvaPSPSym != BAD_VAR_NUM) ? 8 : 0;
 
-    unsigned saveRegsCount = genCountBits(rsMaskSaveRegs);
-    assert((saveRegsCount == compiler->compCalleeRegsPushed) || (saveRegsCount == compiler->compCalleeRegsPushed - 1));
+    // If there is a PSP slot, we have to pad the funclet frame size for OSR.
+    // Form more details see CodeGen::genFuncletProlog
+    //
+    unsigned osrPad = 0;
+    if (compiler->opts.IsOSR() && (pspSize != 0))
+    {
+        osrPad = compiler->info.compPatchpointInfo->TotalFrameSize();
 
-    unsigned saveRegsPlusPSPSize =
-        roundUp((UINT)genTotalFrameSize(), STACK_ALIGN) - compiler->compLclFrameSize + pspSize;
+        // osrPad must be aligned to stackSize
+        assert(osrPad % STACK_ALIGN == 0);
+    }
 
-    unsigned saveRegsPlusPSPSizeAligned = roundUp(saveRegsPlusPSPSize, STACK_ALIGN);
+    genFuncletInfo.fiCalleeSavedPadding            = 0;
+    genFuncletInfo.fiFunction_CallerSP_to_FP_delta = genCallerSPtoFPdelta() - osrPad;
+
+    unsigned savedRegsSize = genCountBits(rsMaskSaveRegs);
+    assert(savedRegsSize == compiler->compCalleeRegsPushed);
+    savedRegsSize <<= 3;
+
+    unsigned saveRegsPlusPSPSize = savedRegsSize + pspSize;
 
     assert(compiler->lvaOutgoingArgSpaceSize % REGSIZE_BYTES == 0);
     unsigned outgoingArgSpaceAligned = roundUp(compiler->lvaOutgoingArgSpaceSize, STACK_ALIGN);
 
-    unsigned maxFuncletFrameSizeAligned = saveRegsPlusPSPSizeAligned + outgoingArgSpaceAligned;
-    assert((maxFuncletFrameSizeAligned % STACK_ALIGN) == 0);
-
-    int spToFpraSaveDelta = compiler->lvaOutgoingArgSpaceSize;
-
-    unsigned funcletFrameSize        = saveRegsPlusPSPSize + compiler->lvaOutgoingArgSpaceSize;
+    unsigned funcletFrameSize        = osrPad + saveRegsPlusPSPSize + compiler->lvaOutgoingArgSpaceSize;
     unsigned funcletFrameSizeAligned = roundUp(funcletFrameSize, STACK_ALIGN);
-    assert(funcletFrameSizeAligned <= maxFuncletFrameSizeAligned);
 
-    unsigned funcletFrameAlignmentPad = funcletFrameSizeAligned - funcletFrameSize;
-    assert((funcletFrameAlignmentPad == 0) || (funcletFrameAlignmentPad == REGSIZE_BYTES));
-
-    if (maxFuncletFrameSizeAligned <= (2048 - 8))
+    int SP_to_CalleeSaved_delta = compiler->lvaOutgoingArgSpaceSize;
+    if ((SP_to_CalleeSaved_delta + savedRegsSize) >= 2040)
     {
-        genFuncletInfo.fiFrameType = 1;
-        saveRegsPlusPSPSize -= 2 * 8; // FP/RA
-    }
-    else
-    {
-        unsigned saveRegsPlusPSPAlignmentPad = saveRegsPlusPSPSizeAligned - saveRegsPlusPSPSize;
-        assert((saveRegsPlusPSPAlignmentPad == 0) || (saveRegsPlusPSPAlignmentPad == REGSIZE_BYTES));
+        int offset              = funcletFrameSizeAligned - SP_to_CalleeSaved_delta;
+        SP_to_CalleeSaved_delta = AlignUp((UINT)offset, STACK_ALIGN);
 
-        genFuncletInfo.fiFrameType = 2;
-        saveRegsPlusPSPSize -= 2 * 8; // FP/RA
+        genFuncletInfo.fiCalleeSavedPadding = SP_to_CalleeSaved_delta - offset;
     }
 
-    int callerSpToPspSlotDelta = -(int)saveRegsPlusPSPSize;
-    genFuncletInfo.fiSpDelta1  = -(int)funcletFrameSizeAligned;
-    int spToPspSlotDelta       = funcletFrameSizeAligned - saveRegsPlusPSPSize;
+    if (compiler->lvaMonAcquired != BAD_VAR_NUM && !compiler->opts.IsOSR())
+    {
+        // We furthermore allocate the "monitor acquired" bool between PSP and
+        // the saved registers because this is part of the EnC header.
+        // Note that OSR methods reuse the monitor bool created by tier 0.
+        osrPad += compiler->lvaLclSize(compiler->lvaMonAcquired);
+    }
 
     /* Now save it for future use */
-    genFuncletInfo.fiSaveRegs              = rsMaskSaveRegs;
-    genFuncletInfo.fiSP_to_FPRA_save_delta = spToFpraSaveDelta;
+    genFuncletInfo.fiSpDelta                 = -(int)funcletFrameSizeAligned;
+    genFuncletInfo.fiSaveRegs                = rsMaskSaveRegs;
+    genFuncletInfo.fiSP_to_CalleeSaved_delta = SP_to_CalleeSaved_delta;
 
-    genFuncletInfo.fiSP_to_PSP_slot_delta       = spToPspSlotDelta;
-    genFuncletInfo.fiCallerSP_to_PSP_slot_delta = callerSpToPspSlotDelta;
+    genFuncletInfo.fiSP_to_PSP_slot_delta       = funcletFrameSizeAligned - osrPad - 8;
+    genFuncletInfo.fiCallerSP_to_PSP_slot_delta = -(int)osrPad - 8;
 
 #ifdef DEBUG
     if (verbose)
     {
         printf("\n");
         printf("Funclet prolog / epilog info\n");
-        printf("                        Save regs: ");
+        printf("                 Save regs: ");
         dspRegMask(genFuncletInfo.fiSaveRegs);
         printf("\n");
-        printf("    Function CallerSP-to-FP delta: %d\n", genFuncletInfo.fiFunction_CallerSP_to_FP_delta);
-        printf("  SP to FP/RA save location delta: %d\n", genFuncletInfo.fiSP_to_FPRA_save_delta);
-        printf("                       Frame type: %d\n", genFuncletInfo.fiFrameType);
-        printf("                       SP delta 1: %d\n", genFuncletInfo.fiSpDelta1);
-
-        if (compiler->lvaPSPSym != BAD_VAR_NUM)
+        if (compiler->opts.IsOSR())
         {
-            if (callerSpToPspSlotDelta != compiler->lvaGetCallerSPRelativeOffset(compiler->lvaPSPSym)) // for
-                                                                                                       // debugging
-            {
-                printf("lvaGetCallerSPRelativeOffset(lvaPSPSym): %d\n",
-                       compiler->lvaGetCallerSPRelativeOffset(compiler->lvaPSPSym));
-            }
+            printf("                           OSR Pad: %d\n", osrPad);
         }
+        printf("     Function CallerSP-to-FP delta: %d\n", genFuncletInfo.fiFunction_CallerSP_to_FP_delta);
+        printf("  SP to CalleeSaved location delta: %d\n", genFuncletInfo.fiSP_to_CalleeSaved_delta);
+        printf("                          SP delta: %d\n", genFuncletInfo.fiSpDelta);
     }
+    assert(genFuncletInfo.fiSP_to_CalleeSaved_delta >= 0);
 
-    assert(genFuncletInfo.fiSP_to_FPRA_save_delta >= 0);
+    if (compiler->lvaPSPSym != BAD_VAR_NUM)
+    {
+        assert(genFuncletInfo.fiCallerSP_to_PSP_slot_delta ==
+               compiler->lvaGetCallerSPRelativeOffset(compiler->lvaPSPSym)); // same offset used in main function and
+                                                                             // funclet!
+    }
 #endif // DEBUG
 }
 
