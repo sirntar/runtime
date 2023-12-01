@@ -571,6 +571,22 @@ void CodeGen::genRestoreCalleeSavedRegistersHelp(regMaskTP regsToRestoreMask, in
  *     1 alignment slot or monitor acquired slot
  *     == 35 slots * 8 bytes = 280 bytes.
  *
+ * The outgoing argument size, however, can be very large, if we call a function that takes a large number of
+ * arguments (note that we currently use the same outgoing argument space size in the funclet as for the main
+ * function, even if the funclet doesn't have any calls, or has a much smaller, or larger, maximum number of
+ * outgoing arguments for any call). In that case, we need to 16-byte align the initial change to SP, before
+ * saving off the callee-saved registers and establishing the PSPsym, so we can use the limited immediate offset
+ * encodings we have available, before doing another 16-byte aligned SP adjustment to create the outgoing argument
+ * space. Both changes to SP might need to add alignment padding.
+ *
+ *  An example epilog sequence:
+ *     addi sp, sp, #outsz       ; if any outgoing argument space
+ *     ld s1, #(xxx-8)(sp)       ; restore callee-saved registers
+ *     ld s2, #xxx(sp)
+ *     ld ra, #(xxx+?-8)(sp)     ; restore RA
+ *     ld fp, #(xxx+?)(sp)       ; restore FP
+ *     addi sp, sp, #framesz
+ *     j ra
  */
 // clang-format on
 
@@ -717,84 +733,64 @@ void CodeGen::genFuncletEpilog()
 
     ScopedSetVariable<bool> _setGeneratingEpilog(&compiler->compGeneratingEpilog, true);
 
-    bool unwindStarted = false;
-    int  frameSize     = genFuncletInfo.fiSpDelta1;
+    compiler->unwindBegEpilog();
 
-    if (!unwindStarted)
-    {
-        // We can delay this until we know we'll generate an unwindable instruction, if necessary.
-        compiler->unwindBegEpilog();
-        unwindStarted = true;
-    }
-
-    regMaskTP maskRestoreRegsFloat = genFuncletInfo.fiSaveRegs & RBM_ALLFLOAT;
-    regMaskTP maskRestoreRegsInt   = genFuncletInfo.fiSaveRegs & ~maskRestoreRegsFloat;
-
-    // Funclets must always save RA and FP, since when we have funclets we must have an FP frame.
-    assert((maskRestoreRegsInt & RBM_RA) != 0);
-    assert((maskRestoreRegsInt & RBM_FP) != 0);
-
-#ifdef DEBUG
-    if (compiler->opts.disAsm)
-    {
-        printf("DEBUG: CodeGen::genFuncletEpilog, frameType:%d\n\n", genFuncletInfo.fiFrameType);
-    }
-#endif
-
-    regMaskTP regsToRestoreMask = maskRestoreRegsInt | maskRestoreRegsFloat;
+    int frameSize = genFuncletInfo.fiSpDelta;
 
     assert(frameSize < 0);
-    if (genFuncletInfo.fiFrameType == 1)
+
+    // s1 is the first calee-safe register
+    regMaskTP maskRestoreRegs = genFuncletInfo.fiSaveRegs & RBM_CALLEE_SAVED;
+    int       regsRestoreSize = (compiler->compCalleeRegsPushed - 2) << 3;
+
+    int offset  = genFuncletInfo.fiSP_to_CalleeSaved_delta;
+    int padding = genFuncletInfo.fiCalleeSavedPadding;
+
+    assert(offset >= 0);
+    assert(padding > 0);
+
+    regNumber tempReg = rsGetRsvdReg();
+
+    if (offset + regsRestoreSize + padding <= 2040)
     {
-        // fiFrameType constraints:
-        assert(frameSize >= -2048);
-        assert(genFuncletInfo.fiSP_to_FPRA_save_delta < 2040);
+        offset += padding;
+        genRestoreCalleeSavedRegistersHelp(maskRestoreRegs, offset, 0);
+        offset += regsRestoreSize;
 
-        regsToRestoreMask &= ~(RBM_RA | RBM_FP); // We restore FP/RA at the end
+        // ld ra, #offset(sp)
+        GetEmitter()->emitIns_R_R_I(INS_ld, EA_PTRSIZE, REG_RA, REG_SPBASE, offset);
+        compiler->unwindSaveReg(REG_RA, offset);
 
-        genRestoreCalleeSavedRegistersHelp(regsToRestoreMask, genFuncletInfo.fiSP_to_PSP_slot_delta + 8, 0);
+        // ld fp, #(offset+8)(sp)
+        GetEmitter()->emitIns_R_R_I(INS_ld, EA_PTRSIZE, REG_FP, REG_SPBASE, offset + 8);
+        compiler->unwindSaveReg(REG_FP, offset + 8);
 
-        GetEmitter()->emitIns_R_R_I(INS_ld, EA_PTRSIZE, REG_RA, REG_SPBASE, genFuncletInfo.fiSP_to_FPRA_save_delta + 8);
-        compiler->unwindSaveReg(REG_RA, genFuncletInfo.fiSP_to_FPRA_save_delta + 8);
-
-        GetEmitter()->emitIns_R_R_I(INS_ld, EA_PTRSIZE, REG_FP, REG_SPBASE, genFuncletInfo.fiSP_to_FPRA_save_delta);
-        compiler->unwindSaveReg(REG_FP, genFuncletInfo.fiSP_to_FPRA_save_delta);
-
-        // generate daddiu SP,SP,imm
-        genStackPointerAdjustment(-frameSize, rsGetRsvdReg(), nullptr, /* reportUnwindData */ true);
-    }
-    else if (genFuncletInfo.fiFrameType == 2)
-    {
-        // fiFrameType constraints:
-        assert(frameSize < -2048);
-
-        int offset  = -frameSize - genFuncletInfo.fiSP_to_FPRA_save_delta;
-        int spDelta = roundUp((UINT)offset, STACK_ALIGN);
-        offset      = spDelta - offset;
-
-        // first, generate daddiu SP,SP,imm
-        genStackPointerAdjustment(-frameSize - spDelta, rsGetRsvdReg(), nullptr,
-                                  /* reportUnwindData */ true);
-
-        int offset2 = frameSize + spDelta + genFuncletInfo.fiSP_to_PSP_slot_delta + 8;
-        assert(offset2 < 2040); // can amend.
-
-        regsToRestoreMask &= ~(RBM_RA | RBM_FP); // We restore FP/RA at the end
-        genRestoreCalleeSavedRegistersHelp(regsToRestoreMask, offset2, 0);
-
-        GetEmitter()->emitIns_R_R_I(INS_ld, EA_PTRSIZE, REG_RA, REG_SPBASE, offset + 8);
-        compiler->unwindSaveReg(REG_RA, offset + 8);
-
-        GetEmitter()->emitIns_R_R_I(INS_ld, EA_PTRSIZE, REG_FP, REG_SPBASE, offset);
-        compiler->unwindSaveReg(REG_FP, offset);
-
-        // second, generate daddiu SP,SP,imm for remaine space.
-        genStackPointerAdjustment(spDelta, rsGetRsvdReg(), nullptr, /* reportUnwindData */ true);
+        // addi sp, sp, -#frameSize
+        genStackPointerAdjustment(-frameSize, tempReg, nullptr, /* reportUnwindData */ true);
     }
     else
     {
-        unreached();
+        assert(frameSize < -2040);
+
+        // addi sp, sp, #offset
+        genStackPointerAdjustment(offset, tempReg, nullptr, /* reportUnwindData */ true);
+
+        genRestoreCalleeSavedRegistersHelp(maskRestoreRegs, padding, 0);
+        regsRestoreSize += padding;
+
+        // ld ra, #regsRestoreSize(sp)
+        GetEmitter()->emitIns_R_R_I(INS_ld, EA_PTRSIZE, REG_RA, REG_SPBASE, regsRestoreSize);
+        compiler->unwindSaveReg(REG_RA, regsRestoreSize);
+
+        // ld fp, #(regsRestoreSize+8)(sp)
+        GetEmitter()->emitIns_R_R_I(INS_ld, EA_PTRSIZE, REG_FP, REG_SPBASE, regsRestoreSize + 8);
+        compiler->unwindSaveReg(REG_FP, regsRestoreSize + 8);
+
+        // addi sp, sp, -#(frameSize + offset)
+        genStackPointerAdjustment(-(frameSize + offset), tempReg, nullptr, /* reportUnwindData */ true);
     }
+
+    // jarl zero, ra
     GetEmitter()->emitIns_R_R_I(INS_jalr, emitActualTypeSize(TYP_I_IMPL), REG_R0, REG_RA, 0);
     compiler->unwindReturn(REG_RA);
 
