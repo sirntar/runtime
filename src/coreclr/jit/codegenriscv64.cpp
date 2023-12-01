@@ -616,7 +616,7 @@ void CodeGen::genFuncletProlog(BasicBlock* block)
     int offset  = genFuncletInfo.fiSP_to_CalleeSaved_delta;
     int padding = genFuncletInfo.fiCalleeSavedPadding;
 
-    assert(offset > 0);
+    assert(offset >= 0);
     assert(padding > 0);
 
     regNumber tempReg = rsGetRsvdReg();
