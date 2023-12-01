@@ -1080,7 +1080,6 @@ void CodeGen::genSetPSPSym(regNumber initReg, bool* pInitRegZeroed)
         SPtoCallerSPdelta += compiler->info.compPatchpointInfo->TotalFrameSize();
     }
 
-
     // We will just use the initReg since it is an available register
     // and we are probably done using it anyway...
     regNumber regTmp = initReg;
@@ -1348,7 +1347,7 @@ void CodeGen::genSetRegToConst(regNumber targetReg, var_types targetType, GenTre
             emitAttr size       = emitActualTypeSize(tree);
             double   constValue = tree->AsDblCon()->DconValue();
 
-            // Make sure we use "daddiu reg, zero, 0x00"  only for positive zero (0.0)
+            // Make sure we use "fmv.w.x reg, zero" only for positive zero (0.0)
             // and not for negative zero (-0.0)
             if (FloatingPointUtils::isPositiveZero(constValue))
             {
@@ -1366,12 +1365,10 @@ void CodeGen::genSetRegToConst(regNumber targetReg, var_types targetType, GenTre
                 CORINFO_FIELD_HANDLE hnd = emit->emitFltOrDblConst(constValue, size);
 
                 // Load the FP constant.
-                assert(targetReg >= REG_F0);
-
-                instruction ins = size == EA_4BYTE ? INS_flw : INS_fld;
+                assert(emit->isFloatReg(targetReg));
 
                 // Compute the address of the FP constant and load the data.
-                emit->emitIns_R_C(ins, size, targetReg, REG_NA, hnd, 0);
+                emit->emitIns_R_C(size == EA_4BYTE ? INS_flw : INS_fld, size, targetReg, REG_NA, hnd, 0);
             }
         }
         break;
