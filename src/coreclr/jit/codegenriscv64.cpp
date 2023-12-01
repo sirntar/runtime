@@ -3532,6 +3532,7 @@ void CodeGen::genCodeForCompare(GenTreeOp* tree)
         bool      isUnordered = (tree->gtFlags & GTF_RELOP_NAN_UN) != 0;
         regNumber regOp1      = op1->GetRegNum();
         regNumber regOp2      = op2->GetRegNum();
+        regNumber tempReg     = rsGetRsvdReg();
 
         if (isUnordered)
         {
@@ -3548,11 +3549,11 @@ void CodeGen::genCodeForCompare(GenTreeOp* tree)
             {
                 skipLabel = genCreateTempLabel();
                 emit->emitIns_R_R(cmpSize == EA_4BYTE ? INS_fclass_s : INS_fclass_d, cmpSize, targetReg, regOp1);
-                emit->emitIns_R_R(cmpSize == EA_4BYTE ? INS_fclass_s : INS_fclass_d, cmpSize, rsGetRsvdReg(), regOp2);
-                emit->emitIns_R_R_R(INS_or, EA_8BYTE, rsGetRsvdReg(), targetReg, rsGetRsvdReg());
-                emit->emitIns_R_R_I(INS_andi, EA_8BYTE, rsGetRsvdReg(), rsGetRsvdReg(), 0x300);
+                emit->emitIns_R_R(cmpSize == EA_4BYTE ? INS_fclass_s : INS_fclass_d, cmpSize, tempReg, regOp2);
+                emit->emitIns_R_R_R(INS_or, EA_8BYTE, tempReg, targetReg, tempReg);
+                emit->emitIns_R_R_I(INS_andi, EA_8BYTE, tempReg, tempReg, 0x300);
                 emit->emitIns_R_R_I(INS_addi, EA_8BYTE, targetReg, REG_R0, 1);
-                emit->emitIns_J(INS_bnez, skipLabel, rsGetRsvdReg());
+                emit->emitIns_J(INS_bnez, skipLabel, tempReg);
                 emit->emitIns_R_R_R(cmpSize == EA_4BYTE ? INS_feq_s : INS_feq_d, cmpSize, targetReg, regOp1, regOp2);
                 genDefineTempLabel(skipLabel);
             }
@@ -3591,12 +3592,12 @@ void CodeGen::genCodeForCompare(GenTreeOp* tree)
             else if (tree->OperIs(GT_NE))
             {
                 emit->emitIns_R_R(cmpSize == EA_4BYTE ? INS_fclass_s : INS_fclass_d, cmpSize, targetReg, regOp1);
-                emit->emitIns_R_R(cmpSize == EA_4BYTE ? INS_fclass_s : INS_fclass_d, cmpSize, rsGetRsvdReg(), regOp2);
-                emit->emitIns_R_R_R(INS_or, EA_8BYTE, rsGetRsvdReg(), targetReg, rsGetRsvdReg());
-                emit->emitIns_R_R_I(INS_andi, EA_8BYTE, rsGetRsvdReg(), rsGetRsvdReg(), 0x300);
+                emit->emitIns_R_R(cmpSize == EA_4BYTE ? INS_fclass_s : INS_fclass_d, cmpSize, tempReg, regOp2);
+                emit->emitIns_R_R_R(INS_or, EA_8BYTE, tempReg, targetReg, tempReg);
+                emit->emitIns_R_R_I(INS_andi, EA_8BYTE, tempReg, tempReg, 0x300);
                 emit->emitIns_R_R_I(INS_addi, EA_8BYTE, targetReg, REG_R0, 0);
                 BasicBlock* skipLabel = genCreateTempLabel();
-                emit->emitIns_J(INS_bnez, skipLabel, rsGetRsvdReg());
+                emit->emitIns_J(INS_bnez, skipLabel, tempReg);
                 emit->emitIns_R_R_R(cmpSize == EA_4BYTE ? INS_feq_s : INS_feq_d, cmpSize, targetReg, regOp1, regOp2);
                 emit->emitIns_R_R_R(INS_sub, EA_8BYTE, targetReg, REG_R0, targetReg);
                 emit->emitIns_R_R_I(INS_addi, EA_8BYTE, targetReg, targetReg, 1);
@@ -3616,28 +3617,7 @@ void CodeGen::genCodeForCompare(GenTreeOp* tree)
     {
         assert(targetReg != REG_NA);
         assert(tree->TypeGet() != TYP_VOID);
-        if (op1->isContainedIntOrIImmed())
-        {
-            op1 = tree->gtOp2;
-            op2 = tree->gtOp1;
-            switch (tree->OperGet())
-            {
-                case GT_LT:
-                    tree->SetOper(GT_GT);
-                    break;
-                case GT_LE:
-                    tree->SetOper(GT_GE);
-                    break;
-                case GT_GT:
-                    tree->SetOper(GT_LT);
-                    break;
-                case GT_GE:
-                    tree->SetOper(GT_LE);
-                    break;
-                default:
-                    break;
-            }
-        }
+
         assert(!op1->isContainedIntOrIImmed());
         assert(tree->OperIs(GT_LT, GT_LE, GT_EQ, GT_NE, GT_GT, GT_GE));
 
