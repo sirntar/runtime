@@ -4026,8 +4026,9 @@ void CodeGen::genCodeForJumpCompare(GenTreeOpCC* tree)
 int CodeGenInterface::genSPtoFPdelta() const
 {
     assert(isFramePointerUsed());
+    assert(compiler->compCalleeRegsPushed >= 2)
 
-    int delta = compiler->lvaOutgoingArgSpaceSize;
+    int delta = compiler->lvaOutgoingArgSpaceSize + (compiler->compCalleeRegsPushed << 3) - 8;
 
     assert(delta >= 0);
     return delta;
@@ -4081,9 +4082,7 @@ int CodeGenInterface::genCallerSPtoFPdelta() const
 
 int CodeGenInterface::genCallerSPtoInitialSPdelta() const
 {
-    int callerSPtoSPdelta = 0;
-
-    callerSPtoSPdelta -= genTotalFrameSize();
+    int callerSPtoSPdelta = -genTotalFrameSize();
 
     assert(callerSPtoSPdelta <= 0);
     return callerSPtoSPdelta;
