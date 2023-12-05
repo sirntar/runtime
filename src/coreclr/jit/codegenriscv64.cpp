@@ -1072,7 +1072,7 @@ void CodeGen::genSetPSPSym(regNumber initReg, bool* pInitRegZeroed)
 
     noway_assert(isFramePointerUsed()); // We need an explicit frame pointer
 
-    int spToCallerSpDelta = -genCallerSPtoInitialSPdelta();
+    int SPtoCallerSPdelta = -genCallerSPtoInitialSPdelta();
 
     if (compiler->opts.IsOSR())
     {
@@ -1084,7 +1084,7 @@ void CodeGen::genSetPSPSym(regNumber initReg, bool* pInitRegZeroed)
     regNumber regTmp = initReg;
     *pInitRegZeroed  = false;
 
-    genInstrWithConstant(INS_addi, EA_PTRSIZE, regTmp, REG_SPBASE, spToCallerSpDelta, regTmp, false);
+    genInstrWithConstant(INS_addi, EA_PTRSIZE, regTmp, REG_SPBASE, SPtoCallerSPdelta, regTmp, false);
     GetEmitter()->emitIns_S_R(INS_sd, EA_PTRSIZE, regTmp, compiler->lvaPSPSym, 0);
 }
 
