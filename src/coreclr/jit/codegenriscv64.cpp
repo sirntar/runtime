@@ -4025,7 +4025,7 @@ void CodeGen::genCodeForJumpCompare(GenTreeOpCC* tree)
 int CodeGenInterface::genSPtoFPdelta() const
 {
     assert(isFramePointerUsed());
-    assert(compiler->compCalleeRegsPushed >= 2)
+    assert(compiler->compCalleeRegsPushed >= 2);
 
     int delta = compiler->lvaOutgoingArgSpaceSize + (compiler->compCalleeRegsPushed << 3) - 8;
 
