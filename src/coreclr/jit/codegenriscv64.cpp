@@ -102,7 +102,6 @@ bool CodeGen::genInstrWithConstant(instruction ins,
 
 void CodeGen::genStackPointerAdjustment(ssize_t spDelta, regNumber tmpReg, bool* pTmpRegIsZero, bool reportUnwindData)
 {
-    // TODO: check whether it is necessary
     // Even though INS_addi is specified here, the encoder will replace it with INS_add
     //
     bool wasTempRegisterUsedForImm =
@@ -213,11 +212,11 @@ void CodeGen::genEpilogRestoreRegPair(regNumber reg1,
     {
         assert(!useSaveNextPair);
 
-        // ld reg2, (offset + 8)(SP)
+        // ld reg2, #(spOffset + 8)(SP)
         GetEmitter()->emitIns_R_R_I(ins, EA_PTRSIZE, reg2, REG_SPBASE, spOffset + 8);
         compiler->unwindSaveReg(reg2, spOffset + 8);
 
-        // ld reg1, offset(SP)
+        // ld reg1, #spOffset(SP)
         GetEmitter()->emitIns_R_R_I(ins, EA_PTRSIZE, reg1, REG_SPBASE, spOffset);
         compiler->unwindSaveReg(reg1, spOffset);
 
@@ -226,11 +225,11 @@ void CodeGen::genEpilogRestoreRegPair(regNumber reg1,
     }
     else
     {
-        // ld reg2, (offset + 8)(SP)
+        // ld reg2, #(spOffset + 8)(SP)
         GetEmitter()->emitIns_R_R_I(ins, EA_PTRSIZE, reg2, REG_SPBASE, spOffset + 8);
         compiler->unwindSaveReg(reg2, spOffset + 8);
 
-        // ld reg1, offset(SP)
+        // ld reg1, #spOffset(SP)
         GetEmitter()->emitIns_R_R_I(ins, EA_PTRSIZE, reg1, REG_SPBASE, spOffset);
         compiler->unwindSaveReg(reg1, spOffset);
     }
@@ -250,7 +249,7 @@ void CodeGen::genEpilogRestoreReg(regNumber reg1, int spOffset, int spDelta, reg
 
     if (spDelta != 0)
     {
-        // ld reg1, offset(SP)
+        // ld reg1, #spOffset(SP)
         GetEmitter()->emitIns_R_R_I(ins, EA_PTRSIZE, reg1, REG_SPBASE, spOffset);
         compiler->unwindSaveReg(reg1, spOffset);
 
@@ -259,7 +258,7 @@ void CodeGen::genEpilogRestoreReg(regNumber reg1, int spOffset, int spDelta, reg
     }
     else
     {
-        // ld reg1 offset(SP)
+        // ld reg1 #spOffset(SP)
         GetEmitter()->emitIns_R_R_I(ins, EA_PTRSIZE, reg1, REG_SPBASE, spOffset);
         compiler->unwindSaveReg(reg1, spOffset);
     }
@@ -537,9 +536,8 @@ void CodeGen::genRestoreCalleeSavedRegistersHelp(regMaskTP regsToRestoreMask, in
  *      |-----------------------|
  *      |  incoming arguments   |
  *      +=======================+ <---- Caller's SP
- *      |      OSR padding      | // If required
- *      |-----------------------|
- *      |  Varargs regs space   | // Only for varargs main functions; 64 bytes
+ *      |     Arguments  Or     | // if needed
+ *      |  Varargs regs space   | // Only for varargs functions; NYI on RV64
  *      |-----------------------|
  *      |    MonitorAcquired    | // 8 bytes; for synchronized methods
  *      |-----------------------|
@@ -547,7 +545,9 @@ void CodeGen::genRestoreCalleeSavedRegistersHelp(regMaskTP regsToRestoreMask, in
  *      |-----------------------|
  *      ~  alignment padding    ~ // To make the whole frame 16 byte aligned
  *      |-----------------------|
- *      |      Saved RA, FP     | // 16 bytes
+ *      |      Saved FP         | // 8 bytes
+ *      |-----------------------|
+ *      |      Saved RA         | // 8 bytes
  *      |-----------------------|
  *      |Callee saved registers | // multiple of 8 bytes, not includting RA/FP
  *      |-----------------------|
@@ -593,7 +593,9 @@ void CodeGen::genFuncletProlog(BasicBlock* block)
 {
 #ifdef DEBUG
     if (verbose)
+    {
         printf("*************** In genFuncletProlog()\n");
+    }
 #endif
 
     assert(block != NULL);
@@ -7377,9 +7379,9 @@ void CodeGen::instGen_MemoryBarrier(BarrierKind barrierKind)
  *      |-----------------------|
  *      |  possible GS cookie   |
  *      |-----------------------|
- *      |      Saved RA         | // 8 bytes
- *      |-----------------------|
  *      |      Saved FP         | // 8 bytes
+ *      |-----------------------|
+ *      |      Saved RA         | // 8 bytes
  *      |-----------------------|
  *      |Callee saved registers | // not including FP/RA; multiple of 8 bytes
  *      |-----------------------|
