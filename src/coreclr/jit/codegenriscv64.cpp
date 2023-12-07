@@ -1041,7 +1041,6 @@ void CodeGen::genFuncletEpilog()
  *
  *  See genFuncletProlog() for more information about the prolog/epilog sequences.
  */
-
 void CodeGen::genCaptureFuncletPrologEpilogInfo()
 {
     if (!compiler->ehAnyFunclets())
