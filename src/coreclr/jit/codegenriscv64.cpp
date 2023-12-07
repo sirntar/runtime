@@ -22,6 +22,32 @@ XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 #include "gcinfoencoder.h"
 #include "patchpointinfo.h"
 
+//------------------------------------------------------------------------
+// genInstrWithConstant:   we will typically generate one instruction
+//
+//    ins  reg1, reg2, imm
+//
+// However the imm might not fit as a directly encodable immediate,
+// when it doesn't fit we generate extra instruction(s) that sets up
+// the 'regTmp' with the proper immediate value.
+//
+//     mov  regTmp, imm
+//     ins  reg1, reg2, regTmp
+//
+// Arguments:
+//    ins                 - instruction
+//    attr                - operation size and GC attribute
+//    reg1, reg2          - first and second register operands
+//    imm                 - immediate value (third operand when it fits)
+//    tmpReg              - temp register to use when the 'imm' doesn't fit. Can be REG_NA
+//                          if caller knows for certain the constant will fit.
+//    inUnwindRegion      - true if we are in a prolog/epilog region with unwind codes.
+//                          Default: false.
+//
+// Return Value:
+//    returns true if the immediate was small enough to be encoded inside instruction. If not,
+//    returns false meaning the immediate was too large and tmpReg was used and modified.
+//
 bool CodeGen::genInstrWithConstant(instruction ins,
                                    emitAttr    attr,
                                    regNumber   reg1,
@@ -100,6 +126,22 @@ bool CodeGen::genInstrWithConstant(instruction ins,
     return immFitsInIns;
 }
 
+//------------------------------------------------------------------------
+// genStackPointerAdjustment: add a specified constant value to the stack pointer in either the prolog
+// or the epilog. The unwind codes for the generated instructions are produced. An available temporary
+// register is required to be specified, in case the constant is too large to encode in an "add"
+// instruction, such that we need to load the constant
+// into a register first, before using it.
+//
+// Arguments:
+//    spDelta                 - the value to add to SP (can be negative)
+//    tmpReg                  - an available temporary register
+//    pTmpRegIsZero           - If we use tmpReg, and pTmpRegIsZero is non-null, we set *pTmpRegIsZero to 'false'.
+//                              Otherwise, we don't touch it.
+//    reportUnwindData        - If true, report the change in unwind data. Otherwise, do not report it.
+//
+// Return Value:
+//    None.
 void CodeGen::genStackPointerAdjustment(ssize_t spDelta, regNumber tmpReg, bool* pTmpRegIsZero, bool reportUnwindData)
 {
     // Even though INS_addi is specified here, the encoder will replace it with INS_add
@@ -126,6 +168,26 @@ void CodeGen::genStackPointerAdjustment(ssize_t spDelta, regNumber tmpReg, bool*
     }
 }
 
+//------------------------------------------------------------------------
+// genPrologSaveRegPair: Save a pair of general-purpose or floating-point/SIMD registers in a function or funclet
+// prolog. If possible, we use pre-indexed addressing to adjust SP and store the registers with a single instruction.
+// The caller must ensure that we can use the STP instruction, and that spOffset will be in the legal range for that
+// instruction.
+//
+// Arguments:
+//    reg1                     - First register of pair to save.
+//    reg2                     - Second register of pair to save.
+//    spOffset                 - The offset from SP to store reg1 (must be positive or zero).
+//    spDelta                  - If non-zero, the amount to add to SP before the register saves (must be negative or
+//                               zero).
+//    useSaveNextPair          - True if the last prolog instruction was to save the previous register pair. This
+//                               allows us to emit the "save_next" unwind code.
+//    tmpReg                   - An available temporary register. Needed for the case of large frames.
+//    pTmpRegIsZero            - If we use tmpReg, and pTmpRegIsZero is non-null, we set *pTmpRegIsZero to 'false'.
+//                               Otherwise, we don't touch it.
+//
+// Return Value:
+//    None.
 void CodeGen::genPrologSaveRegPair(regNumber reg1,
                                    regNumber reg2,
                                    int       spOffset,
@@ -165,6 +227,25 @@ void CodeGen::genPrologSaveRegPair(regNumber reg1,
     compiler->unwindSaveReg(reg2, spOffset + 8);
 }
 
+//------------------------------------------------------------------------
+// genPrologSaveReg: Like genPrologSaveRegPair, but for a single register. Save a single general-purpose or
+// floating-point/SIMD register in a function or funclet prolog. Note that if we wish to change SP (i.e., spDelta != 0),
+// then spOffset must be 8. This is because otherwise we would create an alignment hole above the saved register, not
+// below it, which we currently don't support. This restriction could be loosened if the callers change to handle it
+// (and this function changes to support using pre-indexed SD addressing). The caller must ensure that we can use the
+// SD instruction, and that spOffset will be in the legal range for that instruction.
+//
+// Arguments:
+//    reg1                     - Register to save.
+//    spOffset                 - The offset from SP to store reg1 (must be positive or zero).
+//    spDelta                  - If non-zero, the amount to add to SP before the register saves (must be negative or
+//                               zero).
+//    tmpReg                   - An available temporary register. Needed for the case of large frames.
+//    pTmpRegIsZero            - If we use tmpReg, and pTmpRegIsZero is non-null, we set *pTmpRegIsZero to 'false'.
+//                               Otherwise, we don't touch it.
+//
+// Return Value:
+//    None.
 void CodeGen::genPrologSaveReg(regNumber reg1, int spOffset, int spDelta, regNumber tmpReg, bool* pTmpRegIsZero)
 {
     assert(spOffset >= 0);
@@ -188,6 +269,26 @@ void CodeGen::genPrologSaveReg(regNumber reg1, int spOffset, int spDelta, regNum
     compiler->unwindSaveReg(reg1, spOffset);
 }
 
+//------------------------------------------------------------------------
+// genEpilogRestoreRegPair: This is the opposite of genPrologSaveRegPair(), run in the epilog instead of the prolog.
+// The stack pointer adjustment, if requested, is done after the register restore, using post-index addressing.
+// The caller must ensure that we can use the LDP instruction, and that spOffset will be in the legal range for that
+// instruction.
+//
+// Arguments:
+//    reg1                     - First register of pair to restore.
+//    reg2                     - Second register of pair to restore.
+//    spOffset                 - The offset from SP to load reg1 (must be positive or zero).
+//    spDelta                  - If non-zero, the amount to add to SP after the register restores (must be positive or
+//                               zero).
+//    useSaveNextPair          - True if the last prolog instruction was to save the previous register pair. This
+//                               allows us to emit the "save_next" unwind code.
+//    tmpReg                   - An available temporary register. Needed for the case of large frames.
+//    pTmpRegIsZero            - If we use tmpReg, and pTmpRegIsZero is non-null, we set *pTmpRegIsZero to 'false'.
+//                               Otherwise, we don't touch it.
+//
+// Return Value:
+//    None.
 void CodeGen::genEpilogRestoreRegPair(regNumber reg1,
                                       regNumber reg2,
                                       int       spOffset,
@@ -235,6 +336,20 @@ void CodeGen::genEpilogRestoreRegPair(regNumber reg1,
     }
 }
 
+//------------------------------------------------------------------------
+// genEpilogRestoreReg: The opposite of genPrologSaveReg(), run in the epilog instead of the prolog.
+//
+// Arguments:
+//    reg1                     - Register to restore.
+//    spOffset                 - The offset from SP to restore reg1 (must be positive or zero).
+//    spDelta                  - If non-zero, the amount to add to SP after the register restores (must be positive or
+//                               zero).
+//    tmpReg                   - An available temporary register. Needed for the case of large frames.
+//    pTmpRegIsZero            - If we use tmpReg, and pTmpRegIsZero is non-null, we set *pTmpRegIsZero to 'false'.
+//                               Otherwise, we don't touch it.
+//
+// Return Value:
+//    None.
 void CodeGen::genEpilogRestoreReg(regNumber reg1, int spOffset, int spDelta, regNumber tmpReg, bool* pTmpRegIsZero)
 {
     assert(spOffset >= 0);
@@ -264,6 +379,19 @@ void CodeGen::genEpilogRestoreReg(regNumber reg1, int spOffset, int spDelta, reg
     }
 }
 
+//------------------------------------------------------------------------
+// genBuildRegPairsStack: Build a stack of register pairs for prolog/epilog save/restore for the given mask.
+// The first register pair will contain the lowest register. Register pairs will combine neighbor
+// registers in pairs. If it can't be done (for example if we have a hole or this is the last reg in a mask with
+// odd number of regs) then the second element of that RegPair will be REG_NA.
+//
+// Arguments:
+//   regsMask - a mask of registers for prolog/epilog generation;
+//   regStack - a regStack instance to build the stack in, used to save temp copyings.
+//
+// Return value:
+//   no return value; the regStack argument is modified.
+//
 // static
 void CodeGen::genBuildRegPairsStack(regMaskTP regsMask, ArrayStack<RegPair>* regStack)
 {
@@ -318,6 +446,19 @@ void CodeGen::genBuildRegPairsStack(regMaskTP regsMask, ArrayStack<RegPair>* reg
     genSetUseSaveNextPairs(regStack);
 }
 
+//------------------------------------------------------------------------
+// genSetUseSaveNextPairs: Set useSaveNextPair for each RegPair on the stack which unwind info can be encoded as
+// save_next code.
+//
+// Arguments:
+//   regStack - a regStack instance to set useSaveNextPair.
+//
+// Notes:
+// We can use save_next for RegPair(N, N+1) only when we have sequence like (N-2, N-1), (N, N+1).
+// In this case in the prolog save_next for (N, N+1) refers to save_pair(N-2, N-1);
+// in the epilog the unwinder will search for the first save_pair (N-2, N-1)
+// and then go back to the first save_next (N, N+1) to restore it first.
+//
 // static
 void CodeGen::genSetUseSaveNextPairs(ArrayStack<RegPair>* regStack)
 {
@@ -346,6 +487,18 @@ void CodeGen::genSetUseSaveNextPairs(ArrayStack<RegPair>* regStack)
     }
 }
 
+//------------------------------------------------------------------------
+// genGetSlotSizeForRegsInMask: Get the stack slot size appropriate for the register type from the mask.
+//
+// Arguments:
+//   regsMask - a mask of registers for prolog/epilog generation.
+//
+// Return value:
+//   stack slot size in bytes.
+//
+// Note: Because int and float register type sizes match we can call this function with a mask that includes both.
+//
+// static
 int CodeGen::genGetSlotSizeForRegsInMask(regMaskTP regsMask)
 {
     assert((regsMask & (RBM_CALLEE_SAVED | RBM_FP | RBM_RA)) == regsMask); // Do not expect anything else.
@@ -354,6 +507,14 @@ int CodeGen::genGetSlotSizeForRegsInMask(regMaskTP regsMask)
     return REGSIZE_BYTES;
 }
 
+//------------------------------------------------------------------------
+// genSaveCalleeSavedRegisterGroup: Saves the group of registers described by the mask.
+//
+// Arguments:
+//   regsMask             - a mask of registers for prolog generation;
+//   spDelta              - if non-zero, the amount to add to SP before the first register save (or together with it);
+//   spOffset             - the offset from SP that is the beginning of the callee-saved register area;
+//
 void CodeGen::genSaveCalleeSavedRegisterGroup(regMaskTP regsMask, int spDelta, int spOffset)
 {
     const int slotSize = genGetSlotSizeForRegsInMask(regsMask);
@@ -361,21 +522,23 @@ void CodeGen::genSaveCalleeSavedRegisterGroup(regMaskTP regsMask, int spDelta, i
     ArrayStack<RegPair> regStack(compiler->getAllocator(CMK_Codegen));
     genBuildRegPairsStack(regsMask, &regStack);
 
+    regNumber tempReg = rsGetRsvdReg();
+
     for (int i = 0; i < regStack.Height(); ++i)
     {
         RegPair regPair = regStack.Bottom(i);
         if (regPair.reg2 != REG_NA)
         {
             // We can use two SD instructions.
-            genPrologSaveRegPair(regPair.reg1, regPair.reg2, spOffset, spDelta, regPair.useSaveNextPair, rsGetRsvdReg(),
-                                 nullptr);
+            genPrologSaveRegPair(regPair.reg1, regPair.reg2, spOffset, spDelta,
+                                 regPair.useSaveNextPair, tempReg, nullptr);
 
-            spOffset += 2 * slotSize;
+            spOffset += slotSize << 1;
         }
         else
         {
             // No register pair; we use a SD instruction.
-            genPrologSaveReg(regPair.reg1, spOffset, spDelta, rsGetRsvdReg(), nullptr);
+            genPrologSaveReg(regPair.reg1, spOffset, spDelta, tempReg, nullptr);
             spOffset += slotSize;
         }
 
@@ -383,6 +546,37 @@ void CodeGen::genSaveCalleeSavedRegisterGroup(regMaskTP regsMask, int spDelta, i
     }
 }
 
+//------------------------------------------------------------------------
+// genSaveCalleeSavedRegistersHelp: Save the callee-saved registers in 'regsToSaveMask' to the stack frame
+// in the function or funclet prolog. Registers are saved in register number order from low addresses
+// to high addresses. This means that integer registers are saved at lower addresses than floatint-point/SIMD
+// registers.
+//
+// If establishing frame pointer chaining, it must be done after saving the callee-saved registers.
+//
+// We can only use the instructions that are allowed by the unwind codes. The caller ensures that
+// there is enough space on the frame to store these registers, and that the store instructions
+// we need to use (SD) are encodable with the stack-pointer immediate offsets we need to use.
+//
+// The caller can tell us to fold in a stack pointer adjustment, which we will do with the first instruction.
+// Note that the stack pointer adjustment must be by a multiple of 16 to preserve the invariant that the
+// stack pointer is always 16 byte aligned. If we are saving an odd number of callee-saved
+// registers, though, we will have an empty alignment slot somewhere. It turns out we will put
+// it below (at a lower address) the callee-saved registers, as that is currently how we
+// do frame layout. This means that the first stack offset will be 8 and the stack pointer
+// adjustment must be done by an ADDI (or ADD), and not folded in to a pre-indexed store.
+//
+// Arguments:
+//    regsToSaveMask          - The mask of callee-saved registers to save. If empty, this function does nothing.
+//    lowestCalleeSavedOffset - The offset from SP that is the beginning of the callee-saved register area. Note that
+//                              if non-zero spDelta, then this is the offset of the first save *after* that
+//                              SP adjustment.
+//    spDelta                 - If non-zero, the amount to add to SP before the register saves (must be negative or
+//                              zero).
+//
+// Notes:
+//    The save set can not contain FP/RA in which case FP/RA is saved along with the other callee-saved registers.
+//
 void CodeGen::genSaveCalleeSavedRegistersHelp(regMaskTP regsToSaveMask, int lowestCalleeSavedOffset, int spDelta)
 {
     assert(spDelta <= 0);
@@ -400,7 +594,7 @@ void CodeGen::genSaveCalleeSavedRegistersHelp(regMaskTP regsToSaveMask, int lowe
         return;
     }
 
-    assert((spDelta % 16) == 0);
+    assert((spDelta % STACK_ALIGN) == 0);
 
     assert(regsToSaveCount <= genCountBits(RBM_CALLEE_SAVED));
 
@@ -422,12 +616,22 @@ void CodeGen::genSaveCalleeSavedRegistersHelp(regMaskTP regsToSaveMask, int lowe
     }
 }
 
+//------------------------------------------------------------------------
+// genRestoreCalleeSavedRegisterGroup: Restores the group of registers described by the mask.
+//
+// Arguments:
+//   regsMask             - a mask of registers for epilog generation;
+//   spDelta              - if non-zero, the amount to add to SP after the last register restore (or together with it);
+//   spOffset             - the offset from SP that is the beginning of the callee-saved register area;
+//
 void CodeGen::genRestoreCalleeSavedRegisterGroup(regMaskTP regsMask, int spDelta, int spOffset)
 {
     const int slotSize = genGetSlotSizeForRegsInMask(regsMask);
 
     ArrayStack<RegPair> regStack(compiler->getAllocator(CMK_Codegen));
     genBuildRegPairsStack(regsMask, &regStack);
+
+    regNumber tempReg = rsGetRsvdReg();
 
     int stackDelta = 0;
     for (int i = 0; i < regStack.Height(); ++i)
@@ -444,19 +648,47 @@ void CodeGen::genRestoreCalleeSavedRegisterGroup(regMaskTP regsMask, int spDelta
         RegPair regPair = regStack.Top(i);
         if (regPair.reg2 != REG_NA)
         {
-            spOffset -= 2 * slotSize;
+            spOffset -= slotSize << 1;
 
-            genEpilogRestoreRegPair(regPair.reg1, regPair.reg2, spOffset, stackDelta, regPair.useSaveNextPair,
-                                    rsGetRsvdReg(), nullptr);
+            genEpilogRestoreRegPair(regPair.reg1, regPair.reg2, spOffset, stackDelta, 
+                                    regPair.useSaveNextPair, tempReg, nullptr);
         }
         else
         {
             spOffset -= slotSize;
-            genEpilogRestoreReg(regPair.reg1, spOffset, stackDelta, rsGetRsvdReg(), nullptr);
+            genEpilogRestoreReg(regPair.reg1, spOffset, stackDelta, tempReg, nullptr);
         }
     }
 }
 
+//------------------------------------------------------------------------
+// genRestoreCalleeSavedRegistersHelp: Restore the callee-saved registers in 'regsToRestoreMask' from the stack frame
+// in the function or funclet epilog. This exactly reverses the actions of genSaveCalleeSavedRegistersHelp().
+//
+// Arguments:
+//    regsToRestoreMask       - The mask of callee-saved registers to restore. If empty, this function does nothing.
+//    lowestCalleeSavedOffset - The offset from SP that is the beginning of the callee-saved register area.
+//    spDelta                 - If non-zero, the amount to add to SP after the register restores (must be positive or
+//                              zero).
+//
+// Here's an example restore sequence:
+//      ld    s11, #xxx(sp)
+//      ld    s10, #xxx(sp)
+//      ld    s9, #xxx(sp)
+//      ld    s8, #xxx(sp)
+//      ld    s7, #xxx(sp)
+//      ld    s6, #xxx(sp)
+//      ld    s5, #xxx(sp)
+//      ld    s4, #xxx(sp)
+//      ld    s3, #xxx(sp)
+//      ld    s2, #xxx(sp)
+//      ld    s1, #xxx(sp)
+//
+// Note you call the unwind functions specifying the prolog operation that is being un-done. So, for example, when
+// generating a post-indexed load, you call the unwind function for specifying the corresponding preindexed store.
+//
+// Return Value:
+//    None.
 void CodeGen::genRestoreCalleeSavedRegistersHelp(regMaskTP regsToRestoreMask, int lowestCalleeSavedOffset, int spDelta)
 {
     assert(spDelta >= 0);
@@ -472,7 +704,7 @@ void CodeGen::genRestoreCalleeSavedRegistersHelp(regMaskTP regsToRestoreMask, in
         return;
     }
 
-    assert((spDelta % 16) == 0);
+    assert((spDelta % STACK_ALIGN) == 0);
 
     // We also can restore FP and RA, even though they are not in RBM_CALLEE_SAVED.
     assert(regsToRestoreCount <= genCountBits(RBM_CALLEE_SAVED | RBM_FP | RBM_RA));
@@ -597,6 +829,8 @@ void CodeGen::genFuncletProlog(BasicBlock* block)
         printf("*************** In genFuncletProlog()\n");
     }
 #endif
+    // TODO-RISCV64: Implement varargs (NYI_RISCV64)
+    // TODO-RISCV64-CQ: We can use C extension for optimization
 
     assert(block != NULL);
     assert(block->bbFlags & BBF_FUNCLET_BEG);
@@ -719,6 +953,12 @@ void CodeGen::genFuncletProlog(BasicBlock* block)
     }
 }
 
+/*****************************************************************************
+ *
+ *  Generates code for an EH funclet epilog.
+ *
+ *  See the description of frame shapes at genFuncletProlog().
+ */
 void CodeGen::genFuncletEpilog()
 {
 #ifdef DEBUG
@@ -727,6 +967,8 @@ void CodeGen::genFuncletEpilog()
         printf("*************** In genFuncletEpilog()\n");
     }
 #endif
+    // TODO-RISCV64: Implement varargs (NYI_RISCV64)
+    // TODO-RISCV64-CQ: We can use C extension for optimization
 
     ScopedSetVariable<bool> _setGeneratingEpilog(&compiler->compGeneratingEpilog, true);
 
@@ -789,6 +1031,16 @@ void CodeGen::genFuncletEpilog()
 
     compiler->unwindEndEpilog();
 }
+
+/*****************************************************************************
+ *
+ *  Capture the information used to generate the funclet prologs and epilogs.
+ *  Note that all funclet prologs are identical, and all funclet epilogs are
+ *  identical (per type: filters are identical, and non-filters are identical).
+ *  Thus, we compute the data used for these just once.
+ *
+ *  See genFuncletProlog() for more information about the prolog/epilog sequences.
+ */
 
 void CodeGen::genCaptureFuncletPrologEpilogInfo()
 {
