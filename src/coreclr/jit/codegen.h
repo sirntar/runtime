@@ -342,6 +342,11 @@ protected:
     void genOSRSaveRemainingCalleeSavedRegisters();
 #endif // TARGET_AMD64
 
+#if defined(TARGET_RISCV64)
+    void genSmallStackProbe(ssize_t probeOffset, regNumber rOffset, regNumber rTemp);
+    void genStackProbe(ssize_t frameSize, regNumber rOffset, regNumber rLimit, regNumber rPageSize, regNumber rTemp);
+#endif
+
     void genAllocLclFrame(unsigned frameSize, regNumber initReg, bool* pInitRegZeroed, regMaskTP maskArgRegsLiveIn);
 
     void genPoisonFrame(regMaskTP bbRegLiveIn);
