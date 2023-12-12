@@ -868,6 +868,14 @@ void CodeGen::genFuncletProlog(BasicBlock* block)
 
     regNumber tempReg = rsGetRsvdReg();
 
+    if (compiler->opts.IsOSR())
+    {
+        // With OSR we may see large values for fiSpDelta.
+        // We repurpose genAllocLclFram to do the necessary probing.
+        bool scratchRegIsZero = false;
+        genAllocLclFrame(-frameSize, REG_SCRATCH, &scratchRegIsZero, maskArgRegsLiveIn);
+    }
+
     if (calleeSavedDelta + regsSavedSize + calleeSavedPadding <= 2040)
     {
         calleeSavedDelta += calleeSavedPadding;
@@ -7569,9 +7577,7 @@ void CodeGen::genAllocLclFrame(unsigned frameSize, regNumber initReg, bool* pIni
         return;
     }
 
-    const target_size_t pageSize       = compiler->eeGetPageSize();
-    const target_size_t doublePageSize = pageSize << 1;
-    const target_size_t triplePageSize = doublePageSize + pageSize;
+    const target_size_t pageSize = compiler->eeGetPageSize();
 
     assert(!compiler->info.compPublishStubParam || (REG_SECRET_STUB_PARAM != initReg));
 
@@ -7597,7 +7603,7 @@ void CodeGen::genAllocLclFrame(unsigned frameSize, regNumber initReg, bool* pIni
         // no probe needed
         lastTouchDelta = frameSize;
     }
-    else if (frameSize < triplePageSize)
+    else if (frameSize < 3 * pageSize)
     {
         // between 1 and 3 pages we will probe each page without a loop,
         // because it is faster that way and doesn't cost us much
@@ -7606,10 +7612,11 @@ void CodeGen::genAllocLclFrame(unsigned frameSize, regNumber initReg, bool* pIni
         for (target_size_t probeOffset = pageSize; probeOffset <= frameSize; probeOffset += pageSize)
         {
             genSmallStackProbe((ssize_t)probeOffset, initReg, tempReg);
-
-            *pInitRegZeroed = false; // The initReg does not contain zero
             lastTouchDelta -= pageSize;
         }
+
+        assert(pInitRegZeroed != nullptr);
+        *pInitRegZeroed = false; // The initReg does not contain zero
 
         assert(lastTouchDelta == frameSize % pageSize);
         compiler->unwindPadding();
@@ -7617,7 +7624,7 @@ void CodeGen::genAllocLclFrame(unsigned frameSize, regNumber initReg, bool* pIni
     else
     {
         // using two scratch regs, probe each page, that we need to allocate large stack frame
-        assert(frameSize >= triplePageSize);
+        assert(frameSize >= 3 * pageSize);
 
         availMask &= ~tempMask;              // Remove tempReg register
         noway_assert(availMask != RBM_NONE); // We need one more register for limit condition
@@ -7633,6 +7640,7 @@ void CodeGen::genAllocLclFrame(unsigned frameSize, regNumber initReg, bool* pIni
 
         genStackProbe(frameSize, initReg, rLimit, rPageSize, tempReg);
 
+        assert(pInitRegZeroed != nullptr);
         *pInitRegZeroed = false; // The initReg does not contain zero
 
         lastTouchDelta = frameSize % pageSize;
@@ -7644,12 +7652,14 @@ void CodeGen::genAllocLclFrame(unsigned frameSize, regNumber initReg, bool* pIni
     if (deltaSize > pageSize)
     {
         // on linux there is only one guard page, which we shouldn't skip
-        assert(deltaSize < doublePageSize);
+        assert(deltaSize < pageSize << 1);
 
         genSmallStackProbe(-(ssize_t)frameSize, initReg, tempReg);
 
-        compiler->unwindPadding();
+        assert(pInitRegZeroed != nullptr);
         *pInitRegZeroed = false; // The initReg does not contain zero
+
+        compiler->unwindPadding();
     }
 }
 
