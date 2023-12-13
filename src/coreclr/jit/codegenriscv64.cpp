@@ -841,8 +841,8 @@ void CodeGen::genFuncletProlog(BasicBlock* block)
 
     compiler->unwindBegProlog();
 
-    bool isFilter  = (block->bbCatchTyp == BBCT_FILTER);
-    int  frameSize = genFuncletInfo.fiSpDelta;
+    const bool isFilter  = (block->bbCatchTyp == BBCT_FILTER);
+    const int  frameSize = genFuncletInfo.fiSpDelta;
 
     assert(frameSize < 0);
 
@@ -982,7 +982,7 @@ void CodeGen::genFuncletEpilog()
 
     compiler->unwindBegEpilog();
 
-    int frameSize = genFuncletInfo.fiSpDelta;
+    const int frameSize = genFuncletInfo.fiSpDelta;
 
     assert(frameSize < 0);
 
@@ -2207,8 +2207,6 @@ void CodeGen::genLclHeap(GenTree* tree)
         //       addi     regCnt, REG_R0, 0
         //
         //  Skip:
-        //       sub      regCnt, SP, regCnt
-        //
         //       lui      regTmp, eeGetPageSize()>>12
         //  Loop:
         //       lw       r0, 0(SP)               // tickle the page - read from the page
@@ -2229,7 +2227,7 @@ void CodeGen::genLclHeap(GenTree* tree)
         assert(regCnt != tempReg);
         emit->emitIns_R_R_R(INS_sltu, EA_PTRSIZE, tempReg, REG_SPBASE, regCnt);
 
-        //// subu  regCnt, SP, regCnt      // regCnt now holds ultimate SP
+        // sub  regCnt, SP, regCnt      // regCnt now holds ultimate SP
         emit->emitIns_R_R_R(INS_sub, EA_PTRSIZE, regCnt, REG_SPBASE, regCnt);
 
         // Overflow, set regCnt to lowest possible value
@@ -7484,29 +7482,23 @@ void CodeGen::genEstablishFramePointer(int delta, bool reportUnwindData)
 // Arguments:
 //    probeOffset - current probe offset
 //    rOffset - usually initial register number
-//    rTemp - temporary register, usually REG_T9
 //
-void CodeGen::genSmallStackProbe(ssize_t probeOffset, regNumber rOffset, regNumber rTemp)
+void CodeGen::genSmallStackProbe(ssize_t probeOffset, regNumber rOffset)
 {
-    if (!(probeOffset & 0xfff))
+    if (emitter::isValidSimm12(-probeOffset))
     {
-        // Tipical page size on risc-v is 4KB = 2^12 bytes
-        // Using that fact we will implement a little optimization trick
-        assert(probeOffset == ((probeOffset >> 12) << 12));
-
-        GetEmitter()->emitIns_R_I(INS_lui, EA_PTRSIZE, rOffset, -probeOffset >> 12);
+        GetEmitter()->emitIns_R_R_I(INS_addi, EA_PTRSIZE, rOffset, REG_SPBASE, -probeOffset);
         regSet.verifyRegUsed(rOffset);
-        GetEmitter()->emitIns_R_R_R(INS_add, EA_PTRSIZE, rTemp, REG_SPBASE, rOffset);
         // tickle the page - Read from the updated SP - this triggers a page fault when on the guard page
-        GetEmitter()->emitIns_R_R_I(INS_lw, EA_4BYTE, REG_R0, rTemp, 0);
+        GetEmitter()->emitIns_R_R_I(INS_lw, EA_4BYTE, REG_R0, rOffset, 0);
     }
     else
     {
-        GetEmitter()->emitLoadImmediate(EA_PTRSIZE, rOffset, -(ssize_t)probeOffset);
+        GetEmitter()->emitLoadImmediate(EA_PTRSIZE, rOffset, -probeOffset);
         regSet.verifyRegUsed(rOffset);
-        GetEmitter()->emitIns_R_R_R(INS_add, EA_PTRSIZE, rTemp, REG_SPBASE, rOffset);
+        GetEmitter()->emitIns_R_R_R(INS_add, EA_PTRSIZE, rOffset, REG_SPBASE, rOffset);
         // tickle the page - Read from the updated SP - this triggers a page fault when on the guard page
-        GetEmitter()->emitIns_R_R_I(INS_lw, EA_4BYTE, REG_R0, rTemp, 0);
+        GetEmitter()->emitIns_R_R_I(INS_lw, EA_4BYTE, REG_R0, rOffset, 0);
     }
 }
 
@@ -7517,52 +7509,54 @@ void CodeGen::genSmallStackProbe(ssize_t probeOffset, regNumber rOffset, regNumb
 //      This function is using loop to probe each memory page.
 //
 // Arguments:
-//    frameSize - current probe offset
+//    frameSize - total frame size
 //    rOffset - usually initial register number
 //    rLimit - an extra register for comparison
-//    rPageSize - register for storing page size
-//    rTemp - temporary register, usually REG_T9
+//    rPageSize - register for storing page size if !emitter::isValidSimm12(-pageSize)
 //
-void CodeGen::genStackProbe(ssize_t frameSize, regNumber rOffset, regNumber rLimit, regNumber rPageSize, regNumber rTemp)
+void CodeGen::genStackProbe(ssize_t frameSize, regNumber rOffset, regNumber rLimit, regNumber rPageSize)
 {
-    const target_size_t pageSize = compiler->eeGetPageSize();
+    const ssize_t pageSize         = (ssize_t)compiler->eeGetPageSize();
+    const bool    isPageSize12bits = emitter::isValidSimm12(-pageSize);
 
     // make sure frameSize safely fits within 4 bytes
     noway_assert((ssize_t)(int)frameSize == (ssize_t)frameSize);
 
-    if (!(pageSize & 0xfff))
+    GetEmitter()->emitLoadImmediate(EA_PTRSIZE, rLimit, -frameSize);
+    regSet.verifyRegUsed(rLimit);
+
+    if (isPageSize12bits)
     {
-        const ssize_t shiftedPageSize = (ssize_t)pageSize >> 12;
-
-        // Tipical page size on risc-v is 4KB = 2^12 bytes
-        // Using that fact we will implement a little optimization trick
-        assert(pageSize == (shiftedPageSize << 12));
-
-        GetEmitter()->emitIns_R_I(INS_lui, EA_PTRSIZE, rOffset, -shiftedPageSize);
+        GetEmitter()->emitIns_R_R_I(INS_addi, EA_PTRSIZE, rOffset, REG_SPBASE, -pageSize);
         regSet.verifyRegUsed(rOffset);
-        GetEmitter()->emitIns_R_I(INS_lui, EA_PTRSIZE, rPageSize, shiftedPageSize);
-        regSet.verifyRegUsed(rPageSize);
     }
     else
     {
         GetEmitter()->emitLoadImmediate(EA_PTRSIZE, rOffset, -pageSize);
         regSet.verifyRegUsed(rOffset);
+        GetEmitter()->emitIns_R_R_R(INS_add, EA_PTRSIZE, rOffset, REG_SPBASE, rOffset);
+
         GetEmitter()->emitLoadImmediate(EA_PTRSIZE, rPageSize, pageSize);
         regSet.verifyRegUsed(rPageSize);
     }
 
-    GetEmitter()->emitLoadImmediate(EA_PTRSIZE, rLimit, -(ssize_t)frameSize);
-    regSet.verifyRegUsed(rLimit);
-
     // Loop:
-    GetEmitter()->emitIns_R_R_R(INS_add, EA_PTRSIZE, rTemp, REG_SPBASE, rOffset);
+
     // tickle the page - Read from the updated SP - this triggers a page fault when on the guard page
-    GetEmitter()->emitIns_R_R_I(INS_lw, EA_4BYTE, REG_R0, rTemp, 0);
-    GetEmitter()->emitIns_R_R_R(INS_sub, EA_PTRSIZE, rOffset, rOffset, rPageSize);
+    GetEmitter()->emitIns_R_R_I(INS_lw, EA_4BYTE, REG_R0, rOffset, 0);
+
+    if (isPageSize12bits)
+    {
+        GetEmitter()->emitIns_R_R_I(INS_addi, EA_PTRSIZE, rOffset, rOffset, -pageSize);
+    }
+    else
+    {
+        GetEmitter()->emitIns_R_R_R(INS_sub, EA_PTRSIZE, rOffset, rOffset, rPageSize);
+    }
 
     // each instr is 4 bytes
     // if (rOffset >= rLimit) goto Loop;
-    GetEmitter()->emitIns_R_R_I(INS_bge, EA_PTRSIZE, rOffset, rLimit, -3 << 2);
+    GetEmitter()->emitIns_R_R_I(INS_bge, EA_PTRSIZE, rOffset, rLimit, -2 << 2);
 }
 
 //------------------------------------------------------------------------
@@ -7580,16 +7574,6 @@ void CodeGen::genAllocLclFrame(unsigned frameSize, regNumber initReg, bool* pIni
     const target_size_t pageSize = compiler->eeGetPageSize();
 
     assert(!compiler->info.compPublishStubParam || (REG_SECRET_STUB_PARAM != initReg));
-
-    regMaskTP availMask = RBM_ALLINT & (regSet.rsGetModifiedRegsMask() | ~RBM_INT_CALLEE_SAVED);
-    availMask &= ~maskArgRegsLiveIn;   // Remove all of the incoming argument registers 
-                                       // as they are currently live
-    availMask &= ~genRegMask(initReg); // Remove the pre-calculated initReg
-
-    noway_assert(availMask != RBM_NONE);
-
-    regMaskTP tempMask = genFindLowestBit(availMask);
-    regNumber tempReg  = genRegNumFromMask(tempMask);
 
     target_size_t lastTouchDelta = 0;
 
@@ -7611,7 +7595,7 @@ void CodeGen::genAllocLclFrame(unsigned frameSize, regNumber initReg, bool* pIni
 
         for (target_size_t probeOffset = pageSize; probeOffset <= frameSize; probeOffset += pageSize)
         {
-            genSmallStackProbe((ssize_t)probeOffset, initReg, tempReg);
+            genSmallStackProbe((ssize_t)probeOffset, initReg);
             lastTouchDelta -= pageSize;
         }
 
@@ -7623,22 +7607,32 @@ void CodeGen::genAllocLclFrame(unsigned frameSize, regNumber initReg, bool* pIni
     }
     else
     {
-        // using two scratch regs, probe each page, that we need to allocate large stack frame
+        // probe each page, that we need to allocate large stack frame
         assert(frameSize >= 3 * pageSize);
 
-        availMask &= ~tempMask;              // Remove tempReg register
-        noway_assert(availMask != RBM_NONE); // We need one more register for limit condition
-        tempMask = genFindLowestBit(availMask);
+        regMaskTP availMask = RBM_ALLINT & (regSet.rsGetModifiedRegsMask() | ~RBM_INT_CALLEE_SAVED);
+        availMask &= ~maskArgRegsLiveIn;   // Remove all of the incoming argument registers 
+                                           // as they are currently live
+        availMask &= ~genRegMask(initReg); // Remove the pre-calculated initReg
 
-        regNumber rLimit = genRegNumFromMask(tempMask);
+        noway_assert(availMask != RBM_NONE);
 
-        availMask &= ~tempMask;              // Remove rLimit register
-        noway_assert(availMask != RBM_NONE); // We need one more register for storing page size
-        tempMask = genFindLowestBit(availMask);
+        regMaskTP regMask = genFindLowestBit(availMask);
 
-        regNumber rPageSize = genRegNumFromMask(tempMask);
+        regNumber rLimit    = genRegNumFromMask(regMask);
+        regNumber rPageSize = REG_NA;
 
-        genStackProbe(frameSize, initReg, rLimit, rPageSize, tempReg);
+        if (!emitter::isValidSimm12(-pageSize))
+        {
+            availMask &= ~regMask; // Remove rLimit register
+
+            noway_assert(availMask != RBM_NONE);
+
+            regMask  = genFindLowestBit(availMask);
+            rPageSize = genRegNumFromMask(regMask);
+        }
+
+        genStackProbe((ssize_t)frameSize, initReg, rLimit, rPageSize);
 
         assert(pInitRegZeroed != nullptr);
         *pInitRegZeroed = false; // The initReg does not contain zero
@@ -7654,7 +7648,7 @@ void CodeGen::genAllocLclFrame(unsigned frameSize, regNumber initReg, bool* pIni
         // on linux there is only one guard page, which we shouldn't skip
         assert(deltaSize < pageSize << 1);
 
-        genSmallStackProbe(-(ssize_t)frameSize, initReg, tempReg);
+        genSmallStackProbe((ssize_t)frameSize, initReg);
 
         assert(pInitRegZeroed != nullptr);
         *pInitRegZeroed = false; // The initReg does not contain zero
