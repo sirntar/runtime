@@ -650,7 +650,7 @@ void CodeGen::genRestoreCalleeSavedRegisterGroup(regMaskTP regsMask, int spDelta
         {
             spOffset -= slotSize << 1;
 
-            genEpilogRestoreRegPair(regPair.reg1, regPair.reg2, spOffset, stackDelta, 
+            genEpilogRestoreRegPair(regPair.reg1, regPair.reg2, spOffset, stackDelta,
                                     regPair.useSaveNextPair, tempReg, nullptr);
         }
         else
@@ -737,11 +737,11 @@ void CodeGen::genRestoreCalleeSavedRegistersHelp(regMaskTP regsToRestoreMask, in
 
 // clang-format off
 /*****************************************************************************
- * 
+ *
  *  Generates code for an EH funclet prolog.
- * 
+ *
  *  Funclets have the following incoming arguments:
- * 
+ *
  *      catch:          a0 = the exception object that was caught (see GT_CATCH_ARG)
  *      filter:         a0 = the exception object to filter (see GT_CATCH_ARG), a1 = CallerSP of the containing function
  *      finally/fault:  none
@@ -751,10 +751,10 @@ void CodeGen::genRestoreCalleeSavedRegistersHelp(regMaskTP regsToRestoreMask, in
  *     catch:          a0 = the address at which execution should resume (see BBJ_EHCATCHRET)
  *     filter:         a0 = non-zero if the handler should handle the exception, zero otherwise (see GT_RETFILT)
  *     finally/fault:  none
- * 
+ *
  *  The RISC-V64 funclet prolog is the following (Note: #framesz is total funclet frame size,
  *  including everything; #outsz is outgoing argument space. #framesz must be a multiple of 16):
- * 
+ *
  *  Frame type liking:
  *     addi sp, sp, -#framesz    ; establish the frame
  *     sd s1, #outsz(sp)         ; save callee-saved registers, as necessary
@@ -791,7 +791,7 @@ void CodeGen::genRestoreCalleeSavedRegistersHelp(regMaskTP regsToRestoreMask, in
  *              V
  *
  * Note, that SP only change once. That means, there will be a maximum of one alignment slot needed.
- * Also remember, the stack oiubter needs to be 16 byte aligned at all times. 
+ * Also remember, the stack oiubter needs to be 16 byte aligned at all times.
  * The size of the PSP slot plus callee-saved registers space is a maximum of 280 bytes:
  *
  *     RA,FP registers
@@ -863,10 +863,7 @@ void CodeGen::genFuncletProlog(BasicBlock* block)
     regMaskTP maskSaveRegs  = genFuncletInfo.fiSaveRegs & RBM_CALLEE_SAVED;
     int       regsSavedSize = (compiler->compCalleeRegsPushed - 2) << 3;
 
-    int calleeSavedDelta   = genFuncletInfo.fiSP_to_CalleeSaved_delta;
-    int calleeSavedPadding = genFuncletInfo.fiCalleeSavedPadding;
-
-    regNumber tempReg = rsGetRsvdReg();
+    int calleeSavedDelta = genFuncletInfo.fiSP_to_CalleeSaved_delta;
 
     if (compiler->opts.IsOSR())
     {
@@ -876,12 +873,12 @@ void CodeGen::genFuncletProlog(BasicBlock* block)
         genAllocLclFrame(-frameSize, REG_SCRATCH, &scratchRegIsZero, maskArgRegsLiveIn);
     }
 
-    if (calleeSavedDelta + regsSavedSize + calleeSavedPadding <= 2040)
+    if (calleeSavedDelta + regsSavedSize + genFuncletInfo.fiCalleeSavedPadding <= 2040)
     {
-        calleeSavedDelta += calleeSavedPadding;
+        calleeSavedDelta += genFuncletInfo.fiCalleeSavedPadding;
 
         // addi sp, sp, #frameSize
-        genStackPointerAdjustment(frameSize, tempReg, nullptr, /* reportUnwindData */ true);
+        genStackPointerAdjustment(frameSize, REG_SCRATCH, nullptr, /* reportUnwindData */ true);
 
         genSaveCalleeSavedRegistersHelp(maskSaveRegs, calleeSavedDelta, 0);
         calleeSavedDelta += regsSavedSize;
@@ -901,10 +898,10 @@ void CodeGen::genFuncletProlog(BasicBlock* block)
         int spDelta = frameSize + calleeSavedDelta;
 
         // addi sp, sp, #spDelta
-        genStackPointerAdjustment(spDelta, tempReg, nullptr, /* reportUnwindData */ true);
+        genStackPointerAdjustment(spDelta, REG_SCRATCH, nullptr, /* reportUnwindData */ true);
 
-        genSaveCalleeSavedRegistersHelp(maskSaveRegs, calleeSavedPadding, 0);
-        regsSavedSize += calleeSavedPadding;
+        genSaveCalleeSavedRegistersHelp(maskSaveRegs, genFuncletInfo.fiCalleeSavedPadding, 0);
+        regsSavedSize += genFuncletInfo.fiCalleeSavedPadding;
 
         // sd ra, #regsSavedSize(sp)
         GetEmitter()->emitIns_R_R_I(INS_sd, EA_PTRSIZE, REG_RA, REG_SPBASE, regsSavedSize);
@@ -915,7 +912,7 @@ void CodeGen::genFuncletProlog(BasicBlock* block)
         compiler->unwindSaveReg(REG_FP, regsSavedSize + 8);
 
         // addi sp, sp -#calleeSavedDelta
-        genStackPointerAdjustment(-calleeSavedDelta, tempReg, nullptr, /* reportUnwindData */ true);
+        genStackPointerAdjustment(-calleeSavedDelta, REG_SCRATCH, nullptr, /* reportUnwindData */ true);
     }
 
     // This is the end of the OS-reported prolog for purposes of unwinding
@@ -990,13 +987,12 @@ void CodeGen::genFuncletEpilog()
     int       regsRestoreSize = (compiler->compCalleeRegsPushed - 2) << 3;
 
     int calleeSavedDelta   = genFuncletInfo.fiSP_to_CalleeSaved_delta;
-    int calleeSavedPadding = genFuncletInfo.fiCalleeSavedPadding;
 
     regNumber tempReg = rsGetRsvdReg();
 
-    if (calleeSavedDelta + regsRestoreSize + calleeSavedPadding <= 2040)
+    if (calleeSavedDelta + regsRestoreSize + genFuncletInfo.fiCalleeSavedPadding <= 2040)
     {
-        calleeSavedDelta += calleeSavedPadding;
+        calleeSavedDelta += genFuncletInfo.fiCalleeSavedPadding;
         genRestoreCalleeSavedRegistersHelp(maskRestoreRegs, calleeSavedDelta, 0);
         calleeSavedDelta += regsRestoreSize;
 
@@ -1018,8 +1014,8 @@ void CodeGen::genFuncletEpilog()
         // addi sp, sp, #calleeSavedDelta
         genStackPointerAdjustment(calleeSavedDelta, tempReg, nullptr, /* reportUnwindData */ true);
 
-        genRestoreCalleeSavedRegistersHelp(maskRestoreRegs, calleeSavedPadding, 0);
-        regsRestoreSize += calleeSavedPadding;
+        genRestoreCalleeSavedRegistersHelp(maskRestoreRegs, genFuncletInfo.fiCalleeSavedPadding, 0);
+        regsRestoreSize += genFuncletInfo.fiCalleeSavedPadding;
 
         // ld ra, #regsRestoreSize(sp)
         GetEmitter()->emitIns_R_R_I(INS_ld, EA_PTRSIZE, REG_RA, REG_SPBASE, regsRestoreSize);
@@ -1112,10 +1108,9 @@ void CodeGen::genCaptureFuncletPrologEpilogInfo()
     }
 
     /* Now save it for future use */
-    genFuncletInfo.fiSpDelta                 = -(int)funcletFrameSizeAligned;
-    genFuncletInfo.fiSaveRegs                = rsMaskSaveRegs;
-    genFuncletInfo.fiSP_to_CalleeSaved_delta = SP_to_CalleeSaved_delta;
-
+    genFuncletInfo.fiSpDelta                    = -(int)funcletFrameSizeAligned;
+    genFuncletInfo.fiSaveRegs                   = rsMaskSaveRegs;
+    genFuncletInfo.fiSP_to_CalleeSaved_delta    = SP_to_CalleeSaved_delta;
     genFuncletInfo.fiSP_to_PSP_slot_delta       = funcletFrameSizeAligned - osrPad - 8;
     genFuncletInfo.fiCallerSP_to_PSP_slot_delta = -(int)osrPad - 8;
 
@@ -2010,11 +2005,14 @@ void CodeGen::genLclHeap(GenTree* tree)
     BasicBlock*          endLabel                 = nullptr; // can optimize for riscv64.
     unsigned             stackAdjustment          = 0;
     const target_ssize_t ILLEGAL_LAST_TOUCH_DELTA = (target_ssize_t)-1;
-    target_ssize_t       lastTouchDelta =
-        ILLEGAL_LAST_TOUCH_DELTA; // The number of bytes from SP to the last stack address probed.
+
+    // The number of bytes from SP to the last stack address probed.
+    target_ssize_t lastTouchDelta = ILLEGAL_LAST_TOUCH_DELTA;
 
     noway_assert(isFramePointerUsed()); // localloc requires Frame Pointer to be established since SP changes
     noway_assert(genStackLevel == 0);   // Can't have anything on the stack
+
+    const target_ssize_t pageSize = compiler->eeGetPageSize();
 
     // compute the amount of memory to allocate to properly STACK_ALIGN.
     size_t amount = 0;
@@ -2117,7 +2115,7 @@ void CodeGen::genLclHeap(GenTree* tree)
                 goto ALLOC_DONE;
             }
         }
-        else if (amount < compiler->eeGetPageSize()) // must be < not <=
+        else if (amount < pageSize) // must be < not <=
         {
             // Since the size is less than a page, simply adjust the SP value.
             // The SP might already be in the guard page, so we must touch it BEFORE
@@ -2222,7 +2220,7 @@ void CodeGen::genLclHeap(GenTree* tree)
         if (tempReg == REG_NA)
             tempReg = tree->ExtractTempReg();
 
-        regNumber regTmp = tree->GetSingleTempReg();
+        regNumber rPageSize = tree->GetSingleTempReg();
 
         assert(regCnt != tempReg);
         emit->emitIns_R_R_R(INS_sltu, EA_PTRSIZE, tempReg, REG_SPBASE, regCnt);
@@ -2234,8 +2232,15 @@ void CodeGen::genLclHeap(GenTree* tree)
         emit->emitIns_R_R_I(INS_beq, EA_PTRSIZE, tempReg, REG_R0, 2 << 2);
         emit->emitIns_R_R_I(INS_addi, EA_PTRSIZE, regCnt, REG_R0, 0);
 
-        assert(compiler->eeGetPageSize() == ((compiler->eeGetPageSize() >> 12) << 12));
-        emit->emitIns_R_I(INS_lui, EA_PTRSIZE, regTmp, compiler->eeGetPageSize() >> 12);
+        if (pageSize == ((pageSize >> 12) << 12))
+        {
+            GetEmitter()->emitIns_R_I(INS_lui, EA_PTRSIZE, rPageSize, pageSize >> 12);
+        }
+        else
+        {
+            noway_assert(!(pageSize & 0xfff));
+            GetEmitter()->emitLoadImmediate(EA_PTRSIZE, rPageSize, pageSize);
+        }
 
         // genDefineTempLabel(loop);
 
@@ -2243,14 +2248,14 @@ void CodeGen::genLclHeap(GenTree* tree)
         emit->emitIns_R_R_I(INS_lw, EA_4BYTE, REG_R0, REG_SPBASE, 0);
 
         // decrement SP by eeGetPageSize()
-        emit->emitIns_R_R_R(INS_sub, EA_PTRSIZE, tempReg, REG_SPBASE, regTmp);
+        emit->emitIns_R_R_R(INS_sub, EA_PTRSIZE, tempReg, REG_SPBASE, rPageSize);
 
-        assert(regTmp != tempReg);
+        assert(rPageSize != tempReg);
 
         ssize_t imm = 3 << 2; // goto done.
         emit->emitIns_R_R_I(INS_bltu, EA_PTRSIZE, tempReg, regCnt, imm);
 
-        emit->emitIns_R_R_R(INS_sub, EA_PTRSIZE, REG_SPBASE, REG_SPBASE, regTmp);
+        emit->emitIns_R_R_R(INS_sub, EA_PTRSIZE, REG_SPBASE, REG_SPBASE, rPageSize);
 
         imm = -4 << 2;
         // Jump to loop and tickle new stack address
@@ -2275,7 +2280,7 @@ ALLOC_DONE:
 
         if ((lastTouchDelta == ILLEGAL_LAST_TOUCH_DELTA) ||
             (stackAdjustment + (unsigned)lastTouchDelta + STACK_PROBE_BOUNDARY_THRESHOLD_BYTES >
-             compiler->eeGetPageSize()))
+             pageSize))
         {
             genStackPointerConstantAdjustmentLoopWithProbe(-(ssize_t)stackAdjustment, tempReg);
         }
@@ -7512,47 +7517,36 @@ void CodeGen::genSmallStackProbe(ssize_t probeOffset, regNumber rOffset)
 //    frameSize - total frame size
 //    rOffset - usually initial register number
 //    rLimit - an extra register for comparison
-//    rPageSize - register for storing page size if !emitter::isValidSimm12(-pageSize)
+//    rPageSize - register for storing page size
 //
 void CodeGen::genStackProbe(ssize_t frameSize, regNumber rOffset, regNumber rLimit, regNumber rPageSize)
 {
-    const ssize_t pageSize         = (ssize_t)compiler->eeGetPageSize();
-    const bool    isPageSize12bits = emitter::isValidSimm12(-pageSize);
+    const ssize_t pageSize = (ssize_t)compiler->eeGetPageSize();
 
     // make sure frameSize safely fits within 4 bytes
     noway_assert((ssize_t)(int)frameSize == (ssize_t)frameSize);
 
+    if (pageSize == ((pageSize >> 12) << 12))
+    {
+        GetEmitter()->emitIns_R_I(INS_lui, EA_PTRSIZE, rPageSize, pageSize >> 12);
+    }
+    else
+    {
+        noway_assert(!(pageSize & 0xfff));
+        GetEmitter()->emitLoadImmediate(EA_PTRSIZE, rPageSize, pageSize);
+    }
+    regSet.verifyRegUsed(rPageSize);
+
     GetEmitter()->emitLoadImmediate(EA_PTRSIZE, rLimit, -frameSize);
     regSet.verifyRegUsed(rLimit);
 
-    if (isPageSize12bits)
-    {
-        GetEmitter()->emitIns_R_R_I(INS_addi, EA_PTRSIZE, rOffset, REG_SPBASE, -pageSize);
-        regSet.verifyRegUsed(rOffset);
-    }
-    else
-    {
-        GetEmitter()->emitLoadImmediate(EA_PTRSIZE, rOffset, -pageSize);
-        regSet.verifyRegUsed(rOffset);
-        GetEmitter()->emitIns_R_R_R(INS_add, EA_PTRSIZE, rOffset, REG_SPBASE, rOffset);
-
-        GetEmitter()->emitLoadImmediate(EA_PTRSIZE, rPageSize, pageSize);
-        regSet.verifyRegUsed(rPageSize);
-    }
+    GetEmitter()->emitIns_R_R_R(INS_sub, EA_PTRSIZE, rOffset, REG_SPBASE, rPageSize);
+    regSet.verifyRegUsed(rOffset);
 
     // Loop:
-
     // tickle the page - Read from the updated SP - this triggers a page fault when on the guard page
     GetEmitter()->emitIns_R_R_I(INS_lw, EA_4BYTE, REG_R0, rOffset, 0);
-
-    if (isPageSize12bits)
-    {
-        GetEmitter()->emitIns_R_R_I(INS_addi, EA_PTRSIZE, rOffset, rOffset, -pageSize);
-    }
-    else
-    {
-        GetEmitter()->emitIns_R_R_R(INS_sub, EA_PTRSIZE, rOffset, rOffset, rPageSize);
-    }
+    GetEmitter()->emitIns_R_R_R(INS_sub, EA_PTRSIZE, rOffset, rOffset, rPageSize);
 
     // each instr is 4 bytes
     // if (rOffset >= rLimit) goto Loop;
@@ -7560,7 +7554,27 @@ void CodeGen::genStackProbe(ssize_t frameSize, regNumber rOffset, regNumber rLim
 }
 
 //------------------------------------------------------------------------
-// genAllocLclFrame: Probe the stack and allocate the local stack frame: subtract from SP.
+// genAllocLclFrame: Probe the stack.
+//
+// Notes:
+//      This only does the probing; allocating the frame is done when callee-saved registers are saved.
+//      This is done before anything has been pushed. The previous frame might have a large outgoing argument
+//      space that has been allocated, but the lowest addresses have not been touched. Our frame setup might
+//      not touch up to the first 504 bytes. This means we could miss a guard page. On Windows, however,
+//      there are always three guard pages, so we will not miss them all. On Linux, there is only one guard
+//      page by default, so we need to be more careful. We do an extra probe if we might not have probed
+//      recently enough. That is, if a call and prolog establishment might lead to missing a page. We do this
+//      on Windows as well just to be consistent, even though it should not be necessary.
+//
+// Arguments:
+//      frameSize         - the size of the stack frame being allocated.
+//      initReg           - register to use as a scratch register.
+//      pInitRegZeroed    - OUT parameter. *pInitRegZeroed is set to 'false' if and only if
+//                          this call sets 'initReg' to a non-zero value. Otherwise, it is unchanged.
+//      maskArgRegsLiveIn - incoming argument registers that are currently live.
+//
+// Return value:
+//      None
 //
 void CodeGen::genAllocLclFrame(unsigned frameSize, regNumber initReg, bool* pInitRegZeroed, regMaskTP maskArgRegsLiveIn)
 {
@@ -7578,8 +7592,8 @@ void CodeGen::genAllocLclFrame(unsigned frameSize, regNumber initReg, bool* pIni
     target_size_t lastTouchDelta = 0;
 
     // Emit the following sequence to 'tickle' the pages.
-    // Note it is important that stack pointer not change until this is complete since the tickles 
-    // could cause a stack overflow, and we need to be able to crawl the stack afterward 
+    // Note it is important that stack pointer not change until this is complete since the tickles
+    // could cause a stack overflow, and we need to be able to crawl the stack afterward
     // (which means the stack pointer needs to be known).
 
     if (frameSize < pageSize)
@@ -7611,26 +7625,21 @@ void CodeGen::genAllocLclFrame(unsigned frameSize, regNumber initReg, bool* pIni
         assert(frameSize >= 3 * pageSize);
 
         regMaskTP availMask = RBM_ALLINT & (regSet.rsGetModifiedRegsMask() | ~RBM_INT_CALLEE_SAVED);
-        availMask &= ~maskArgRegsLiveIn;   // Remove all of the incoming argument registers 
+        availMask &= ~maskArgRegsLiveIn;   // Remove all of the incoming argument registers
                                            // as they are currently live
         availMask &= ~genRegMask(initReg); // Remove the pre-calculated initReg
 
         noway_assert(availMask != RBM_NONE);
 
         regMaskTP regMask = genFindLowestBit(availMask);
+        regNumber rLimit  = genRegNumFromMask(regMask);
 
-        regNumber rLimit    = genRegNumFromMask(regMask);
-        regNumber rPageSize = REG_NA;
+        availMask &= ~regMask; // Remove rLimit register
 
-        if (!emitter::isValidSimm12(-pageSize))
-        {
-            availMask &= ~regMask; // Remove rLimit register
+        noway_assert(availMask != RBM_NONE);
 
-            noway_assert(availMask != RBM_NONE);
-
-            regMask  = genFindLowestBit(availMask);
-            rPageSize = genRegNumFromMask(regMask);
-        }
+        regMask  = genFindLowestBit(availMask);
+        regNumber rPageSize = genRegNumFromMask(regMask);
 
         genStackProbe((ssize_t)frameSize, initReg, rLimit, rPageSize);
 
@@ -7645,7 +7654,6 @@ void CodeGen::genAllocLclFrame(unsigned frameSize, regNumber initReg, bool* pIni
     target_size_t deltaSize = lastTouchDelta + STACK_PROBE_BOUNDARY_THRESHOLD_BYTES;
     if (deltaSize > pageSize)
     {
-        // on linux there is only one guard page, which we shouldn't skip
         assert(deltaSize < pageSize << 1);
 
         genSmallStackProbe((ssize_t)frameSize, initReg);
@@ -7821,7 +7829,7 @@ void CodeGen::instGen_MemoryBarrier(BarrierKind barrierKind)
  *      fsd f18, #(offset+16)(sp)
  *      ; ...
  *      fsd f27, #(offset+8*11)(sp)
- * 
+ *
  *      ; save int regs
  *      sd s1, #offset2(sp)
  *      sd s2, #(offset2+8)(sp)
@@ -7984,7 +7992,7 @@ void CodeGen::genPushCalleeSavedRegisters(regNumber initReg, bool* pInitRegZeroe
 
         JITDUMP("Frame type 2. #outsz=%d; #framesz=%d; LclFrameSize=%d\n",
                 unsigned(compiler->lvaOutgoingArgSpaceSize), totalFrameSize, compiler->compLclFrameSize);
-        
+
         if ((offset + (compiler->compCalleeRegsPushed << 3)) >= 2040)
         {
             offset            = totalFrameSize - compiler->lvaOutgoingArgSpaceSize;
@@ -8055,10 +8063,10 @@ void CodeGen::genPopCalleeSavedRegisters(bool jmpEpilog)
     // ensure offset of sd/ld
     if (totalFrameSize <= 2040)
     {
-        JITDUMP("Frame type 1. #outsz=%d; #framesz=%d; localloc? %s\n", 
-                unsigned(compiler->lvaOutgoingArgSpaceSize), totalFrameSize, 
+        JITDUMP("Frame type 1. #outsz=%d; #framesz=%d; localloc? %s\n",
+                unsigned(compiler->lvaOutgoingArgSpaceSize), totalFrameSize,
                 dspBool(compiler->compLocallocUsed));
-        
+
         if (compiler->compLocallocUsed)
         {
             SPtoFPdelta = (compiler->compCalleeRegsPushed << 3) - 8 + compiler->lvaOutgoingArgSpaceSize;
@@ -8068,7 +8076,7 @@ void CodeGen::genPopCalleeSavedRegisters(bool jmpEpilog)
     }
     else
     {
-        JITDUMP("Frame type 2. #outsz=%d; #framesz=%d; calleeSaveRegsPushed: %d; localloc? %s\n", 
+        JITDUMP("Frame type 2. #outsz=%d; #framesz=%d; calleeSaveRegsPushed: %d; localloc? %s\n",
                 unsigned(compiler->lvaOutgoingArgSpaceSize), totalFrameSize, compiler->compCalleeRegsPushed,
                 dspBool(compiler->compLocallocUsed));
 
