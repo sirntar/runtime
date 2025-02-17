@@ -1004,15 +1004,7 @@ BasicBlock* CodeGen::genCallFinally(BasicBlock* block)
 
         // Now go to where the finally funclet needs to return to.
         BasicBlock* const finallyContinuation = nextBlock->GetFinallyContinuation();
-        if (nextBlock->NextIs(finallyContinuation) && !compiler->fgInDifferentRegions(nextBlock, finallyContinuation))
-        {
-            // Fall-through.
-            // TODO-RISCV64-CQ: Can we get rid of this instruction, and just have the call return directly
-            // to the next instruction? This would depend on stack walking from within the finally
-            // handler working without this instruction being in this special EH region.
-            instGen(INS_nop);
-        }
-        else
+        if (!nextBlock->NextIs(finallyContinuation) || compiler->fgInDifferentRegions(nextBlock, finallyContinuation))
         {
             inst_JMP(EJ_jmp, finallyContinuation);
         }
