@@ -1155,43 +1155,47 @@ void emitter::emitIns_R_L(instruction ins, emitAttr attr, BasicBlock* dst, regNu
     appendToCurIG(id);
 }
 
-void emitter::emitIns_J_R(instruction ins, emitAttr attr, BasicBlock* dst, regNumber reg)
+/*****************************************************************************
+ *
+ * Emit jump instruction (j/jal/jalr)
+ *
+ * Note: we force use of labels because it provides cleaner flowgraph blocks.
+ * This has no direct impact on generated assembly code.
+ */
+void emitter::emitIns_J(instruction ins, BasicBlock* dst, regNumber reg1, regNumber reg2)
 {
-    NYI_RISCV64("emitIns_J_R-----unimplemented/unused on RISCV64 yet----");
-}
-
-void emitter::emitIns_J(instruction ins, BasicBlock* dst, int instrCount)
-{
-    assert(dst != nullptr);
-    //
-    // INS_OPTS_J: placeholders.  1-ins: if the dst outof-range will be replaced by INS_OPTS_JALR.
-    // jal/j/jalr/bnez/beqz/beq/bne/blt/bge/bltu/bgeu dst
-
-    assert(dst->HasFlag(BBF_HAS_LABEL));
+    // force using labels
+    assert(dst != nullptr, "Please define label.");
+    // INS_jal == INS_j (with rd = zero)
+    assert(ins == INS_jal || ins ==  INS_jalr, "Use emitIns_J_cond!");
 
     instrDescJmp* id = emitNewInstrJmp();
-    assert((INS_jal <= ins) && (ins <= INS_bgeu));
     id->idIns(ins);
-    id->idReg1((regNumber)(instrCount & 0x1f));
-    id->idReg2((regNumber)((instrCount >> 5) & 0x1f));
 
-    id->idInsOpt(INS_OPTS_J);
+    if (ins != INS_jalr)
+    {
+        id->idReg1(reg1);
+        id->idInsOpt(INS_OPTS_J);
+        // only short jumps possible - up to +/-1MB
+        id->idjKeepLong = false;
+    }
+    else // INS_jalr
+    {
+        // rs1 can be zero if we will make a short jump without pseudo instructions
+        id->idReg1(reg1);
+        // rd can be zero if we doesnt care about ret
+        id->idReg2(reg2);
+        id->idInsOpt(INS_OPTS_JALR);
+        // can be long jump if we use auipc - see emitter::emitOutputInstr_OptsJalr
+        id->idjKeepLong = false;
+    }
+
     emitCounts_INS_OPTS_J++;
-    id->idAddr()->iiaBBlabel = dst;
 
     if (emitComp->opts.compReloc)
     {
         id->idSetIsDspReloc();
     }
-
-    id->idjShort = false;
-
-    // TODO-RISCV64: maybe deleted this.
-    id->idjKeepLong = emitComp->fgInDifferentRegions(emitComp->compCurBB, dst);
-#ifdef DEBUG
-    if (emitComp->opts.compLongAddress) // Force long branches
-        id->idjKeepLong = 1;
-#endif // DEBUG
 
     /* Record the jump's IG and offset within it */
     id->idjIG   = emitCurIG;
@@ -1210,41 +1214,45 @@ void emitter::emitIns_J(instruction ins, BasicBlock* dst, int instrCount)
     appendToCurIG(id);
 }
 
-void emitter::emitIns_J_cond_la(instruction ins, BasicBlock* dst, regNumber reg1, regNumber reg2)
+void emitter::emitIns_J_cond(instruction ins, BasicBlock* dst, regNumber reg1, regNumber reg2)
 {
-    // TODO-RISCV64:
-    //   Now the emitIns_J_cond_la() is only the short condition branch.
-    //   There is no long condition branch for RISCV64 so far.
-    //   For RISCV64 , the long condition branch is like this:
-    //     --->  branch_condition  condition_target;     //here is the condition branch, short branch is enough.
-    //     --->  jump jump_target; (this supporting the long jump.)
-    //     condition_target:
-    //     ...
-    //     ...
-    //     jump_target:
-    //
-    //
-    // INS_OPTS_J_cond: placeholders.  1-ins.
-    //   ins  reg1, reg2, dst
+    assert(dst != nullptr); // force using labels
+    assert(ins == INS_beq || ins == INS_bne || ins == INS_blt ||
+           ins == INS_bge || ins == INS_bltu || ins == INS_bgeu);
 
-    assert(dst != nullptr);
-    assert(dst->HasFlag(BBF_HAS_LABEL));
+    if (emitComp->fgInDifferentRegions(emitComp->compCurBB, dst))
+    {
+        // jump out of rage
+        // we will translate this into a short conditional jump and a long unconditional jump
+        BasicBlock* skip = genCreateTempLabel();
+        // on rv64 (in every extension) opposite comparisons are exactly 0x1000 apart
+        instruction negIns = ins & 0x1000 ? ins & ~0x1000 : ins | 0x1000;
+        // we use negation to skip the actual jump to the target if the condition is not met
+        emitIns_J_cond(negIns, skip, reg1, reg2);
+        
+        // jalr will be replaced by auipc + jalr in emitter::emitOutputInstr_OptsJalr
+        // we don't emit these instructions directly here to keep our code clean
+        emitIns_J(INS_jalr, dst, REG_ZERO, REG_ZERO);
+
+        genDefineTempLabel(skip);
+        return;
+    }
 
     instrDescJmp* id = emitNewInstrJmp();
-
     id->idIns(ins);
+
     id->idReg1(reg1);
     id->idReg2(reg2);
-    id->idjShort = false;
-
     id->idInsOpt(INS_OPTS_J_cond);
-    id->idAddr()->iiaBBlabel = dst;
 
-    id->idjKeepLong = emitComp->fgInDifferentRegions(emitComp->compCurBB, dst);
-#ifdef DEBUG
-    if (emitComp->opts.compLongAddress) // Force long branches
-        id->idjKeepLong = 1;
-#endif // DEBUG
+    id->idjKeepLong = false; // long jumps are not directly supported for conditional jumps
+
+    emitCounts_INS_OPTS_J++;
+
+    if (emitComp->opts.compReloc)
+    {
+        id->idSetIsDspReloc();
+    }
 
     /* Record the jump's IG and offset within it */
     id->idjIG   = emitCurIG;
@@ -2797,10 +2805,12 @@ void emitter::emitOutputInstrJumpDistanceHelper(const insGroup* ig,
         }
         dstOffs = ig->igOffs + emitFindOffset(ig, insNum + 1 + instrCount);
         dstAddr = emitOffsetToPtr(dstOffs);
-        return;
     }
-    dstOffs = jmp->idAddr()->iiaIGlabel->igOffs;
-    dstAddr = emitOffsetToPtr(dstOffs);
+    else
+    {
+        dstOffs = jmp->idAddr()->iiaIGlabel->igOffs;
+        dstAddr = emitOffsetToPtr(dstOffs);
+    }
 }
 
 /*****************************************************************************
@@ -3189,8 +3199,10 @@ BYTE* emitter::emitOutputInstr_OptsJCond(BYTE* dst, instrDesc* id, const insGrou
 
 BYTE* emitter::emitOutputInstr_OptsJ(BYTE* dst, instrDesc* id, const insGroup* ig, instruction* ins)
 {
-    const ssize_t immediate = emitOutputInstrJumpDistance(dst, ig, static_cast<instrDescJmp*>(id));
+    ssize_t immediate = emitOutputInstrJumpDistance(dst, ig, static_cast<instrDescJmp*>(id));
     assert((immediate & 0x03) == 0);
+
+    assert(immediate >> 12)
 
     *ins = id->idIns();
 
@@ -3205,18 +3217,18 @@ BYTE* emitter::emitOutputInstr_OptsJ(BYTE* dst, instrDesc* id, const insGroup* i
         case INS_jalr:
             dst += emitOutput_ITypeInstr(dst, INS_jalr, id->idReg1(), id->idReg2(), TrimSignedToImm12(immediate));
             break;
-        case INS_bnez:
-        case INS_beqz:
-            dst += emitOutput_BTypeInstr(dst, *ins, id->idReg1(), REG_ZERO, TrimSignedToImm13(immediate));
-            break;
-        case INS_beq:
-        case INS_bne:
-        case INS_blt:
-        case INS_bge:
-        case INS_bltu:
-        case INS_bgeu:
-            dst += emitOutput_BTypeInstr(dst, *ins, id->idReg1(), id->idReg2(), TrimSignedToImm13(immediate));
-            break;
+        // case INS_bnez:
+        // case INS_beqz:
+        //     dst += emitOutput_BTypeInstr(dst, *ins, id->idReg1(), REG_ZERO, TrimSignedToImm13(immediate));
+        //     break;
+        // case INS_beq:
+        // case INS_bne:
+        // case INS_blt:
+        // case INS_bge:
+        // case INS_bltu:
+        // case INS_bgeu:
+        //     dst += emitOutput_BTypeInstr(dst, *ins, id->idReg1(), id->idReg2(), TrimSignedToImm13(immediate));
+        //     break;
         default:
             unreached();
             break;
@@ -3251,8 +3263,8 @@ BYTE* emitter::emitOutputInstr_OptsC(BYTE* dst, instrDesc* id, const insGroup* i
 
 size_t emitter::emitOutputInstr(insGroup* ig, instrDesc* id, BYTE** dp)
 {
-    BYTE*             dst  = *dp;
-    BYTE*             dst2 = dst + 4;
+    BYTE*             dst  = *dp; // + writeableOffset ???
+    BYTE*             dst2 = dst + 4; // addr for updating gc info if needed.
     const BYTE* const odst = *dp;
     instruction       ins;
     size_t            sz = 0;
@@ -3290,7 +3302,7 @@ size_t emitter::emitOutputInstr(insGroup* ig, instrDesc* id, BYTE** dp)
             break;
         case INS_OPTS_J:
             // jal/j/jalr/bnez/beqz/beq/bne/blt/bge/bltu/bgeu dstRW-relative.
-            dst = emitOutputInstr_OptsJ(dst, id, ig, &ins);
+            dst = emitOutputInstr_OptsJ(dst, static_cast<instrDescJmp*>(id), ig, &ins);
             sz  = sizeof(instrDescJmp);
             break;
         case INS_OPTS_C:

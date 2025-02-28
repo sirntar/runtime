@@ -29,8 +29,6 @@ const char* emitFPregName(unsigned reg, bool varName = true);
 const char* emitVectorRegName(regNumber reg);
 #endif // DEBUG
 
-void emitIns_J_cond_la(instruction ins, BasicBlock* dst, regNumber reg1 = REG_R0, regNumber reg2 = REG_R0);
-
 void emitLoadImmediate(emitAttr attr, regNumber reg, ssize_t imm);
 
 /************************************************************************/
@@ -222,11 +220,25 @@ inline static bool isFloatReg(regNumber reg)
     return (reg >= REG_FP_FIRST && reg <= REG_FP_LAST);
 }
 
-/************************************************************************/
-/*                   Output target-independent instructions             */
-/************************************************************************/
+// more certain check than ins >= beq && ins <= bgeu
+inline static bool isCondJumpInstruction(instruction ins)
+{
+    uint16_t lower12 = ins & 0x0fff;
 
-void emitIns_J(instruction ins, BasicBlock* dst, int instrCount = 0);
+    if (lower12 != 0x63)
+    {
+        return false;
+    }
+
+    uint16_t upper4 = (ins >> 12) & 0xf;
+
+    return upper4 == 0 || upper4 == 1 || (upper4 >= 4 && upper4 <= 7);
+}
+
+inline static bool isJumpInstruction(instruction ins)
+{
+    return ins == INS_jal || ins == INS_jalr; // j == jal
+}
 
 /************************************************************************/
 /*           The public entry points to output instructions             */
@@ -234,6 +246,9 @@ void emitIns_J(instruction ins, BasicBlock* dst, int instrCount = 0);
 
 public:
 void emitIns(instruction ins);
+
+void emitIns_J(instruction ins, BasicBlock* dst, regNumber reg1 = REG_ZERO, regNumber reg2 = REG_ZERO);
+void emitIns_J_cond(instruction ins, BasicBlock* dst, regNumber reg1, regNumber reg2 = REG_ZERO);
 
 void emitIns_S_R(instruction ins, emitAttr attr, regNumber ireg, int varx, int offs);
 void emitIns_S_R_R(instruction ins, emitAttr attr, regNumber ireg, regNumber tmpReg, int varx, int offs);
@@ -283,8 +298,6 @@ void emitIns_R_C(
     instruction ins, emitAttr attr, regNumber reg, regNumber tmpReg, CORINFO_FIELD_HANDLE fldHnd, int offs);
 
 void emitIns_R_L(instruction ins, emitAttr attr, BasicBlock* dst, regNumber reg);
-
-void emitIns_J_R(instruction ins, emitAttr attr, BasicBlock* dst, regNumber reg);
 
 void emitIns_R_AR(instruction ins, emitAttr attr, regNumber ireg, regNumber reg, int offs);
 

@@ -886,7 +886,7 @@ void CodeGen::genZeroInitFrameUsingBlockInit(int untrLclHi, int untrLclLo, regNu
     // When it is 10 or greater, we will emit a loop containing a sd instruction.
     // In both of these cases the sd instruction will write two zeros to memory
     // and we will use a single str instruction at the end whenever we have an odd count.
-    if (uCntSlots >= 10)
+    if (uCntSlots >= 12)
         useLoop = true;
 
     if (useLoop)
@@ -897,21 +897,89 @@ void CodeGen::genZeroInitFrameUsingBlockInit(int untrLclHi, int untrLclLo, regNu
         rCnt    = genRegNumFromMask(regMask);
         availMask &= ~regMask;
 
-        noway_assert(uCntSlots >= 2);
+        noway_assert(uCntSlots >= 12);
         assert((genRegMask(rCnt) & intRegState.rsCalleeRegArgMaskLiveIn) == 0); // rCnt is not a live incoming
                                                                                 // argument reg
+
+        //
+        // ; base isa
+        //       li         rCnt, uCntSlots / 2
+        // Loop:
+        //      sd         zero, (8 + padding)rAddr           ; store first elem of block
+        //      sd         zero, (0 + padding)rAddr           ; store second elem of block
+        //      addi       rCnt, rCnt, -1
+        //      addi       rAddr, rAddr, 2 * REGSIZE_BYTES    ; go to the next block
+        //      bnez       rCnt, Loop                         ; Anything left?
+        //
+        // TODO-RISCV64: implement extensions
+        //
+        // ; V-extension:
+        //
+        //      vsetvli    t0, zero, e64, m1, ta, ma          ; SEW=64b LMUL=1
+        //      vmv.v.i    v0, 0                              ; fill v0 with zeros
+        // Loop:
+        //      vsd        v0, (padding)rAddr                 ; store 2 * 8 = 16 bytes of zero
+        //      addi       rAddr, rAddr, 2 * REGSIZE_BYTES    ; advance by block size (16 bytes)
+        //      addi       rCnt, rCnt, -1
+        //      bnez        rCnt, Loop
+        //
+        // ; cmo-extension:
+        //
+        //      li         rCnt, uCntSlots
+        //      addi       rAddr, rAddr, padding
+        // Loop:
+        //      cbo.zero   rAddr                             ; Store zeros to the full set of bytes
+        //                                                   ; corresponding to a cache block
+        //      addi       rAddr, rAddr, REGSIZE_BYTES + padding
+        //      addi       rCnt, rCnt, -1
+        //      bnez       rCnt, Loop
+        //
+
+        // if (uCntSlots % 4)
+        // {
+        //     instGen_Set_Reg_To_Imm(EA_PTRSIZE, rCnt, (ssize_t)uCntSlots / 4);
+
+        //     BasicBlock* loop = genCreateTempLabel();
+        //     genDefineTempLabel(loop);
+
+        //     GetEmitter()->emitIns_R_R_I(INS_sd, EA_PTRSIZE, REG_R0, rAddr, 0 + padding);
+        //     GetEmitter()->emitIns_R_R_I(INS_sd, EA_PTRSIZE, REG_R0, rAddr, 8 + padding);
+        //     GetEmitter()->emitIns_R_R_I(INS_sd, EA_PTRSIZE, REG_R0, rAddr, 16 + padding);
+        //     GetEmitter()->emitIns_R_R_I(INS_sd, EA_PTRSIZE, REG_R0, rAddr, 24 + padding);
+        //     GetEmitter()->emitIns_R_R_I(INS_addi, EA_PTRSIZE, rCnt, rCnt, -1);
+
+        //     GetEmitter()->emitIns_R_R_I(INS_addi, EA_PTRSIZE, rAddr, rAddr, 4 * REGSIZE_BYTES + 3 * padding);
+        //     GetEmitter()->emitIns_J(INS_bnez, loop, rCnt, -6 << 2);
+
+        //     uCntBytes %= REGSIZE_BYTES * 4;
+        // }
+        // else
+        // {
+        //     instGen_Set_Reg_To_Imm(EA_PTRSIZE, rCnt, (ssize_t)uCntSlots / 2);
+
+        //     BasicBlock* loop = genCreateTempLabel();
+        //     genDefineTempLabel(loop);
+
+        //     GetEmitter()->emitIns_R_R_I(INS_sd, EA_PTRSIZE, REG_R0, rAddr, 0 + padding);
+        //     GetEmitter()->emitIns_R_R_I(INS_sd, EA_PTRSIZE, REG_R0, rAddr, 8 + padding);
+        //     GetEmitter()->emitIns_R_R_I(INS_addi, EA_PTRSIZE, rCnt, rCnt, -1);
+
+        //     GetEmitter()->emitIns_R_R_I(INS_addi, EA_PTRSIZE, rAddr, rAddr, 2 * REGSIZE_BYTES + padding);
+        //     GetEmitter()->emitIns_J(INS_bnez, loop, rCnt, -4 << 2);
+
+        //     uCntBytes %= REGSIZE_BYTES * 2;
+        // }
+
+        /// old
         instGen_Set_Reg_To_Imm(EA_PTRSIZE, rCnt, (ssize_t)uCntSlots / 2);
 
         // TODO-RISCV64: maybe optimize further
         GetEmitter()->emitIns_R_R_I(INS_sd, EA_PTRSIZE, REG_R0, rAddr, 8 + padding);
         GetEmitter()->emitIns_R_R_I(INS_sd, EA_PTRSIZE, REG_R0, rAddr, 0 + padding);
         GetEmitter()->emitIns_R_R_I(INS_addi, EA_PTRSIZE, rCnt, rCnt, -1);
-
-        // bne rCnt, zero, -4 * 4
         ssize_t imm = -16;
         GetEmitter()->emitIns_R_R_I(INS_addi, EA_PTRSIZE, rAddr, rAddr, 2 * REGSIZE_BYTES);
         GetEmitter()->emitIns_R_R_I(INS_bne, EA_PTRSIZE, rCnt, REG_R0, imm);
-
         uCntBytes %= REGSIZE_BYTES * 2;
     }
     else
@@ -2471,9 +2539,10 @@ void CodeGen::genCodeForCmpXchg(GenTreeCmpXchg* treeNode)
 
     genDefineTempLabel(retry);
     e->emitIns_R_R_R(is4 ? INS_lr_w : INS_lr_d, size, target, loc, REG_R0); // load original value
-    e->emitIns_J_cond_la(INS_bne, fail, target, comparand);                 // fail if doesn’t match
+    e->emitIns_J_cond(INS_bne, fail, target, comparand);                    // fail if doesn’t match
     e->emitIns_R_R_R(is4 ? INS_sc_w : INS_sc_d, size, storeErr, loc, val);  // try to update
-    e->emitIns_J(INS_bnez, retry, storeErr);                                // retry if update failed
+    e->emitIns_J_cond(INS_bne, retry, storeErr, REG_ZERO);
+    e->emitIns_J_cond(INS_bnez, retry, storeErr);                           // retry if update failed
     genDefineTempLabel(fail);
 
     gcInfo.gcMarkRegSetNpt(locOp->gtGetRegMask());
@@ -6873,7 +6942,7 @@ void CodeGen::genAllocLclFrame(unsigned frameSize, regNumber initReg, bool* pIni
 void CodeGen::genJumpToThrowHlpBlk_la(
     SpecialCodeKind codeKind, instruction ins, regNumber reg1, BasicBlock* failBlk, regNumber reg2)
 {
-    assert(INS_beq <= ins && ins <= INS_bgeu);
+    assert(emitter::isCondJumpInstruction(ins));
 
     bool useThrowHlpBlk = compiler->fgUseThrowHelperBlocks();
 
@@ -6926,28 +6995,8 @@ void CodeGen::genJumpToThrowHlpBlk_la(
         emitter::EmitCallType callType;
         regNumber             callTarget;
 
-        // maybe optimize
-        // ins = (instruction)(ins^((ins != INS_beq)+(ins != INS_bne)));
-        if (ins == INS_blt)
-        {
-            ins = INS_bge;
-        }
-        else if (ins == INS_bltu)
-        {
-            ins = INS_bgeu;
-        }
-        else if (ins == INS_bge)
-        {
-            ins = INS_blt;
-        }
-        else if (ins == INS_bgeu)
-        {
-            ins = INS_bltu;
-        }
-        else
-        {
-            ins = ins == INS_beq ? INS_bne : INS_beq;
-        }
+        // on rv64 (in every extension) opposite comparisons are exactly 0x1000 apart
+        ins = ins & 0x1000 ? ins & ~0x1000 : ins | 0x1000;
 
         if (addr == nullptr)
         {
