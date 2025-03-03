@@ -1166,8 +1166,7 @@ void emitter::emitIns_J(instruction ins, BasicBlock* dst, regNumber reg1, regNum
 {
     // force using labels
     assert(dst != nullptr, "Please define label.");
-    // INS_jal == INS_j (with rd = zero)
-    assert(ins == INS_jal || ins ==  INS_jalr, "Use emitIns_J_cond!");
+    assert(isJumpInstruction(ins), "Use emitIns_J_cond!");
 
     instrDescJmp* id = emitNewInstrJmp();
     id->idIns(ins);
@@ -1217,8 +1216,7 @@ void emitter::emitIns_J(instruction ins, BasicBlock* dst, regNumber reg1, regNum
 void emitter::emitIns_J_cond(instruction ins, BasicBlock* dst, regNumber reg1, regNumber reg2)
 {
     assert(dst != nullptr); // force using labels
-    assert(ins == INS_beq || ins == INS_bne || ins == INS_blt ||
-           ins == INS_bge || ins == INS_bltu || ins == INS_bgeu);
+    assert(isCondJumpInstruction(ins), "Illegal instruction!");
 
     if (emitComp->fgInDifferentRegions(emitComp->compCurBB, dst))
     {
@@ -1229,7 +1227,7 @@ void emitter::emitIns_J_cond(instruction ins, BasicBlock* dst, regNumber reg1, r
         instruction negIns = ins & 0x1000 ? ins & ~0x1000 : ins | 0x1000;
         // we use negation to skip the actual jump to the target if the condition is not met
         emitIns_J_cond(negIns, skip, reg1, reg2);
-        
+
         // jalr will be replaced by auipc + jalr in emitter::emitOutputInstr_OptsJalr
         // we don't emit these instructions directly here to keep our code clean
         emitIns_J(INS_jalr, dst, REG_ZERO, REG_ZERO);

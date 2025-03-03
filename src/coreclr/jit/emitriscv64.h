@@ -220,24 +220,18 @@ inline static bool isFloatReg(regNumber reg)
     return (reg >= REG_FP_FIRST && reg <= REG_FP_LAST);
 }
 
-// more certain check than ins >= beq && ins <= bgeu
 inline static bool isCondJumpInstruction(instruction ins)
 {
-    uint16_t lower12 = ins & 0x0fff;
-
-    if (lower12 != 0x63)
-    {
-        return false;
-    }
-
-    uint16_t upper4 = (ins >> 12) & 0xf;
-
-    return upper4 == 0 || upper4 == 1 || (upper4 >= 4 && upper4 <= 7);
+    // beqz == beq (with rd = zero)
+    // bnez == bne (with rd = zero)
+    return ins == INS_beq || ins == INS_bne || ins == INS_blt ||
+           ins == INS_bge || ins == INS_bltu || ins == INS_bgeu;
 }
 
 inline static bool isJumpInstruction(instruction ins)
 {
-    return ins == INS_jal || ins == INS_jalr; // j == jal
+    // INS_jal == INS_j (with rd = zero)
+    return ins == INS_jal || ins == INS_jalr;
 }
 
 /************************************************************************/
