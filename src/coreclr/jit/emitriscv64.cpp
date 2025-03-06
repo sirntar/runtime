@@ -1157,36 +1157,37 @@ void emitter::emitIns_R_L(instruction ins, emitAttr attr, BasicBlock* dst, regNu
 
 /*****************************************************************************
  *
- * Emit jump instruction (j/jal/jalr)
+ * Emit short jump instruction (j/jal) (up to ~1MB forward and 1MB backward)
  *
- * Note: we force use of labels because it provides cleaner flowgraph blocks.
- * This has no direct impact on generated assembly code.
  */
-void emitter::emitIns_J(instruction ins, BasicBlock* dst, regNumber reg1, regNumber reg2)
+void emitter::emitIns_J(instruction ins, BasicBlock* dst, ssize_t instrCount)
 {
-    // force using labels
-    assert(dst != nullptr, "Please define label.");
-    assert(isJumpInstruction(ins), "Use emitIns_J_cond!");
+    assert(ins == INS_jal, "Use emitIns_J_cond or emitIns_JALR");
+
+    if (dst != nullptr)
+    {
+        assert(dst->HasFlag(BBF_HAS_LABEL));
+    }
+    else
+    {
+        // imm[20|10:1|11|19:12] -> 20 bits including sign bit, so its about +/-1MB
+        assert(instrCount != 0 && (-0x100000 <= instrCount && instrCount <= 0xFFFFF));
+    }
 
     instrDescJmp* id = emitNewInstrJmp();
-    id->idIns(ins);
+    code_t      code = emitInsCode(ins);
 
-    if (ins != INS_jalr)
+    id->idIns(ins);
+    id->idInsOpt(INS_OPTS_J);
+    id->idjKeepLong = false;
+
+    if (dst != nullptr)
     {
-        id->idReg1(reg1);
-        id->idInsOpt(INS_OPTS_J);
-        // only short jumps possible - up to +/-1MB
-        id->idjKeepLong = false;
+        id->idAddr()->iiaBBlabel = dst;
     }
-    else // INS_jalr
+    else
     {
-        // rs1 can be zero if we will make a short jump without pseudo instructions
-        id->idReg1(reg1);
-        // rd can be zero if we doesnt care about ret
-        id->idReg2(reg2);
-        id->idInsOpt(INS_OPTS_JALR);
-        // can be long jump if we use auipc - see emitter::emitOutputInstr_OptsJalr
-        id->idjKeepLong = false;
+        id->idAddr()->iiaSetInstrCount(instrCount);
     }
 
     emitCounts_INS_OPTS_J++;
@@ -1196,11 +1197,11 @@ void emitter::emitIns_J(instruction ins, BasicBlock* dst, regNumber reg1, regNum
         id->idSetIsDspReloc();
     }
 
-    /* Record the jump's IG and offset within it */
+    // Record the jump's IG and offset within it
     id->idjIG   = emitCurIG;
     id->idjOffs = emitCurIGsize;
 
-    /* Append this jump to this IG's jump list */
+    // Append this jump to this IG's jump list
     id->idjNext      = emitCurIGjmpList;
     emitCurIGjmpList = id;
 
@@ -1209,41 +1210,43 @@ void emitter::emitIns_J(instruction ins, BasicBlock* dst, regNumber reg1, regNum
 #endif
 
     id->idCodeSize(4);
-
     appendToCurIG(id);
 }
 
-void emitter::emitIns_J_cond(instruction ins, BasicBlock* dst, regNumber reg1, regNumber reg2)
+/*****************************************************************************
+ *
+ * Emit short jump instruction (j/jal) (up to ~1MB forward and 1MB backward)
+ *
+ */
+void emitter::emitIns_JALR(instruction ins, register reg1, register reg2, ssize_t imm)
 {
-    assert(dst != nullptr); // force using labels
-    assert(isCondJumpInstruction(ins), "Illegal instruction!");
+    assert(ins == INS_jalr, "Use emitIns_J_cond or emitIns_J");
 
-    if (emitComp->fgInDifferentRegions(emitComp->compCurBB, dst))
+    if (dst != nullptr)
     {
-        // jump out of rage
-        // we will translate this into a short conditional jump and a long unconditional jump
-        BasicBlock* skip = genCreateTempLabel();
-        // on rv64 (in every extension) opposite comparisons are exactly 0x1000 apart
-        instruction negIns = ins & 0x1000 ? ins & ~0x1000 : ins | 0x1000;
-        // we use negation to skip the actual jump to the target if the condition is not met
-        emitIns_J_cond(negIns, skip, reg1, reg2);
-
-        // jalr will be replaced by auipc + jalr in emitter::emitOutputInstr_OptsJalr
-        // we don't emit these instructions directly here to keep our code clean
-        emitIns_J(INS_jalr, dst, REG_ZERO, REG_ZERO);
-
-        genDefineTempLabel(skip);
-        return;
+        assert(dst->HasFlag(BBF_HAS_LABEL));
+    }
+    else
+    {
+        assert(instrCount != 0 && (instrCount >= -1048576 && instrCount < 1048576));
     }
 
     instrDescJmp* id = emitNewInstrJmp();
+    code_t      code = emitInsCode(ins);
+
     id->idIns(ins);
+    id->idInsOpt(INS_OPTS_J);
+    id->idjKeepLong = false;
+    id->idCodeSize(4);
 
-    id->idReg1(reg1);
-    id->idReg2(reg2);
-    id->idInsOpt(INS_OPTS_J_cond);
-
-    id->idjKeepLong = false; // long jumps are not directly supported for conditional jumps
+    if (dst != nullptr)
+    {
+        id->idAddr()->iiaBBlabel = dst;
+    }
+    else
+    {
+        id->idAddr()->iiaSetInstrCount(instrCount);
+    }
 
     emitCounts_INS_OPTS_J++;
 
@@ -1252,11 +1255,73 @@ void emitter::emitIns_J_cond(instruction ins, BasicBlock* dst, regNumber reg1, r
         id->idSetIsDspReloc();
     }
 
-    /* Record the jump's IG and offset within it */
+    // Record the jump's IG and offset within it
     id->idjIG   = emitCurIG;
     id->idjOffs = emitCurIGsize;
 
-    /* Append this jump to this IG's jump list */
+    // Append this jump to this IG's jump list
+    id->idjNext      = emitCurIGjmpList;
+    emitCurIGjmpList = id;
+
+#if EMITTER_STATS
+    emitTotalIGjmps++;
+#endif
+
+    appendToCurIG(id);
+}
+
+/*****************************************************************************
+ *
+ * Emit conditional jump instruction (beq/bne/blt/bge/bltu/bgeu/beqz/bnez)
+ *
+ * Note: we force use of labels because it provides cleaner flowgraph blocks.
+ * This has no direct impact on generated assembly code.
+ */
+void emitter::emitIns_J_cond(instruction ins, BasicBlock* dst, regNumber reg1, regNumber reg2, ssize_t imm)
+{
+    if (dst != nullptr)
+    {
+        assert(dst->HasFlag(BBF_HAS_LABEL));
+    }
+    else
+    {
+        // conditional jump range is only +/-4KB
+        assert(imm != 0 && (-0x1000 <= imm && imm <= 0xFFF));
+    }
+
+    assert(isCondJumpInstruction(ins), "Illegal instruction!");
+    assert(isGeneralRegisterOrR0(reg1) && isGeneralRegisterOrR0(reg2));
+
+    instrDescJmp* id = emitNewInstrJmp();
+    id->idIns(ins);
+    id->idInsOpt(INS_OPTS_J_cond);
+    // long jumps are not directly supported for conditional jumps
+    id->idjKeepLong = false;
+
+    id->idReg1(reg1);
+    id->idReg2(reg2);
+
+    if (dst != nullptr)
+    {
+        id->idAddr()->iiaBBlabel = dst;
+    }
+    else
+    {
+        id->idAddr()->iiaSetInstrCount(imm);
+    }
+
+    emitCounts_INS_OPTS_J++;
+
+    if (emitComp->opts.compReloc)
+    {
+        id->idSetIsDspReloc();
+    }
+
+    // Record the jump's IG and offset within it
+    id->idjIG   = emitCurIG;
+    id->idjOffs = emitCurIGsize;
+
+    // Append this jump to this IG's jump list
     id->idjNext      = emitCurIGjmpList;
     emitCurIGjmpList = id;
 
@@ -1888,8 +1953,6 @@ AGAIN:
         insGroup* jmpIG;
         insGroup* tgtIG;
 
-        UNATIVE_OFFSET jsz; // size of the jump instruction in bytes
-
         NATIVE_OFFSET  extra;           // How far beyond the short jump range is this jump offset?
         UNATIVE_OFFSET srcInstrOffs;    // offset of the source instruction of the jump
         UNATIVE_OFFSET srcEncodingOffs; // offset of the source used by the instruction set to calculate the relative
@@ -1907,10 +1970,6 @@ AGAIN:
                emitNxtIGnum > unsigned(0xFFFF)); // igNum might overflow
         lastIG = jmp->idjIG;
 #endif // DEBUG
-
-        /* Get hold of the current jump size */
-
-        jsz = jmp->idCodeSize();
 
         /* Get the group the jump is in */
 
@@ -2050,8 +2109,7 @@ AGAIN:
                 instruction ins = jmp->idIns();
                 assert((INS_jal <= ins) && (ins <= INS_bgeu));
 
-                if (ins > INS_jalr || (ins < INS_jalr && ins > INS_j)) // jal < beqz < bnez < jalr <
-                                                                       // beq/bne/blt/bltu/bge/bgeu
+                if (isCondJumpInstruction(ins))
                 {
                     if (isValidSimm13(jmpDist + maxPlaceholderSize))
                     {
@@ -2065,25 +2123,26 @@ AGAIN:
                     else
                     {
                         // convert to opposite branch and jalr
-                        extra = 4 * 6;
+                        extra = 4 * 6; // TODO-INSTRUCTIONS: check how many instructions do I need for branch + auipc/jalr
                     }
                 }
-                else if (ins == INS_jal || ins == INS_j)
+                else if (ins == INS_jal) // jal = j
                 {
                     if (isValidSimm21(jmpDist + maxPlaceholderSize))
                     {
-                        continue;
+                        continue; // short jump
                     }
-                    else
+                    else // long jump
                     {
                         // convert to jalr
                         extra = 4 * 5;
                     }
                 }
-                else
+                else // jalr
                 {
                     assert(ins == INS_jalr);
-                    assert((jmpDist + maxPlaceholderSize) < 0x800);
+                    // jalr can reach any address in memory if used with auipc
+                    // assert((jmpDist + maxPlaceholderSize) < 0x800);
                     continue;
                 }
 
@@ -2124,8 +2183,7 @@ AGAIN:
                 instruction ins = jmp->idIns();
                 assert((INS_jal <= ins) && (ins <= INS_bgeu));
 
-                if (ins > INS_jalr || (ins < INS_jalr && ins > INS_j)) // jal < beqz < bnez < jalr <
-                                                                       // beq/bne/blt/bltu/bge/bgeu
+                if (isCondJumpInstruction(ins))
                 {
                     if (isValidSimm13(jmpDist + maxPlaceholderSize))
                     {
@@ -2139,16 +2197,16 @@ AGAIN:
                     else
                     {
                         // convert to opposite branch and jalr
-                        extra = 4 * 6;
+                        extra = 4 * 6; // TODO-INSTRUCTIONS: check how many instructions do I need for branch + auipc/jalr
                     }
                 }
-                else if (ins == INS_jal || ins == INS_j)
+                else if (ins == INS_jal) // jal = j
                 {
                     if (isValidSimm21(jmpDist + maxPlaceholderSize))
                     {
-                        continue;
+                        continue; // short jump
                     }
-                    else
+                    else // long jump
                     {
                         // convert to jalr
                         extra = 4 * 5;
@@ -2157,7 +2215,8 @@ AGAIN:
                 else
                 {
                     assert(ins == INS_jalr);
-                    assert((jmpDist + maxPlaceholderSize) < 0x800);
+                    // jalr can reach any address in memory if used with auipc
+                    // assert((jmpDist + maxPlaceholderSize) < 0x800);
                     continue;
                 }
 
@@ -3135,7 +3194,7 @@ BYTE* emitter::emitOutputInstr_OptsJalr(BYTE* dst, instrDescJmp* jmp, const insG
         case 8:
             return emitOutputInstr_OptsJalr8(dst, jmp, immediate);
         case 24:
-            assert(jmp->idInsIs(INS_jal, INS_j));
+            assert(jmp->idInsIs(INS_jal)); // jal = j = jalr (with rd = 0)
             return emitOutputInstr_OptsJalr24(dst, immediate);
         case 28:
             return emitOutputInstr_OptsJalr28(dst, jmp, immediate);
@@ -3187,6 +3246,7 @@ BYTE* emitter::emitOutputInstr_OptsJalr28(BYTE* dst, const instrDescJmp* jmp, ss
 
 BYTE* emitter::emitOutputInstr_OptsJCond(BYTE* dst, instrDesc* id, const insGroup* ig, instruction* ins)
 {
+    // TODO-JUMPS: add conditional codes
     const ssize_t immediate = emitOutputInstrJumpDistance(dst, ig, static_cast<instrDescJmp*>(id));
 
     *ins = id->idIns();
@@ -3295,11 +3355,10 @@ size_t emitter::emitOutputInstr(insGroup* ig, instrDesc* id, BYTE** dp)
             sz  = sizeof(instrDescJmp);
             break;
         case INS_OPTS_J_cond:
-            dst = emitOutputInstr_OptsJCond(dst, id, ig, &ins);
+            dst = emitOutputInstr_OptsJCond(dst, static_cast<instrDescJmp*>(id), ig, &ins);
             sz  = sizeof(instrDescJmp);
             break;
         case INS_OPTS_J:
-            // jal/j/jalr/bnez/beqz/beq/bne/blt/bge/bltu/bgeu dstRW-relative.
             dst = emitOutputInstr_OptsJ(dst, static_cast<instrDescJmp*>(id), ig, &ins);
             sz  = sizeof(instrDescJmp);
             break;

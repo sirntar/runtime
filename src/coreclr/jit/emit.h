@@ -687,13 +687,11 @@ protected:
         }
 #elif defined(TARGET_RISCV64)
         insFormat idInsFmt() const
-        {
-            NYI_RISCV64("idInsFmt-----unimplemented on RISCV64 yet----");
+        { // unused on rv64
             return (insFormat)0;
         }
         void idInsFmt(insFormat insFmt)
         {
-            NYI_RISCV64("idInsFmt-----unimplemented on RISCV64 yet----");
         }
 #else
         insFormat idInsFmt() const

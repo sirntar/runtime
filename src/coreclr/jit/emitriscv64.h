@@ -222,16 +222,31 @@ inline static bool isFloatReg(regNumber reg)
 
 inline static bool isCondJumpInstruction(instruction ins)
 {
-    // beqz == beq (with rd = zero)
-    // bnez == bne (with rd = zero)
-    return ins == INS_beq || ins == INS_bne || ins == INS_blt ||
-           ins == INS_bge || ins == INS_bltu || ins == INS_bgeu;
+    switch (ins)
+    {
+        case INS_beq: // beqz = beq (with rd = zero)
+        case INS_bne: // bnez = bne (with rd = zero)
+        case INS_blt:
+        case INS_bge:
+        case INS_bltu:
+        case INS_bgeu:
+            return true;
+        default:
+            return false;
+    }
 }
 
 inline static bool isJumpInstruction(instruction ins)
 {
-    // INS_jal == INS_j (with rd = zero)
+    // jal = j = jalr (with rd = zero)
     return ins == INS_jal || ins == INS_jalr;
+}
+
+inline static instruction toOppositeBranch(instruction ins)
+{
+    assert(isCondJumpInstruction(ins));
+    // on rv64 (in every extension) opposite comparisons are exactly 0x1000 apart
+    return ins & 0x1000 ? ins & ~0x1000 : ins | 0x1000;
 }
 
 /************************************************************************/
@@ -241,8 +256,8 @@ inline static bool isJumpInstruction(instruction ins)
 public:
 void emitIns(instruction ins);
 
-void emitIns_J(instruction ins, BasicBlock* dst, regNumber reg1 = REG_ZERO, regNumber reg2 = REG_ZERO);
-void emitIns_J_cond(instruction ins, BasicBlock* dst, regNumber reg1, regNumber reg2 = REG_ZERO);
+void emitIns_J(instruction ins, BasicBlock* dst, ssize_t instrCount = 0);
+void emitter::emitIns_J_cond(instruction ins, BasicBlock* dst, regNumber reg1, regNumber reg2 = REG_ZERO, ssize_t imm = 0);
 
 void emitIns_S_R(instruction ins, emitAttr attr, regNumber ireg, int varx, int offs);
 void emitIns_S_R_R(instruction ins, emitAttr attr, regNumber ireg, regNumber tmpReg, int varx, int offs);
