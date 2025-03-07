@@ -256,8 +256,8 @@ inline static instruction toOppositeBranch(instruction ins)
 public:
 void emitIns(instruction ins);
 
-void emitIns_J(instruction ins, BasicBlock* dst, ssize_t instrCount = 0);
-void emitter::emitIns_J_cond(instruction ins, BasicBlock* dst, regNumber reg1, regNumber reg2 = REG_ZERO, ssize_t imm = 0);
+void emitIns_J(BasicBlock* dst, ssize_t instrCount = 0);
+void emitIns_J_cond(instruction ins, BasicBlock* dst, regNumber reg1, regNumber reg2 = REG_ZERO, ssize_t imm = 0);
 
 void emitIns_S_R(instruction ins, emitAttr attr, regNumber ireg, int varx, int offs);
 void emitIns_S_R_R(instruction ins, emitAttr attr, regNumber ireg, regNumber tmpReg, int varx, int offs);
