@@ -1048,7 +1048,7 @@ BasicBlock* CodeGen::genCallFinally(BasicBlock* block)
 
     if (block->HasFlag(BBF_RETLESS_CALL))
     {
-        GetEmitter()->emitIns_J(INS_jal, block->GetTarget());
+        GetEmitter()->emitIns_J(block->GetTarget());
 
         // We have a retless call, and the last instruction generated was a call.
         // If the next block is in a different EH region (or is the end of the code

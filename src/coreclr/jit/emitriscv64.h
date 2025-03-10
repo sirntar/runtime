@@ -224,25 +224,27 @@ inline static bool isCondJumpInstruction(instruction ins)
 {
     switch (ins)
     {
-        case INS_beq: // beqz = beq (with rd = zero)
-        case INS_bne: // bnez = bne (with rd = zero)
+        case INS_beq:
+        case INS_bne:
         case INS_blt:
         case INS_bge:
         case INS_bltu:
         case INS_bgeu:
+        case INS_beqz:
+        case INS_bnez:
             return true;
         default:
             return false;
     }
+    unreached();
 }
 
 inline static bool isJumpInstruction(instruction ins)
 {
-    // jal = j = jalr (with rd = zero)
-    return ins == INS_jal || ins == INS_jalr;
+    return ins == INS_j || ins == INS_jal || ins == INS_jalr;
 }
 
-inline static instruction toOppositeBranch(instruction ins)
+inline static instruction reverseBranchIns(instruction ins)
 {
     assert(isCondJumpInstruction(ins));
     // on rv64 (in every extension) opposite comparisons are exactly 0x1000 apart
@@ -256,7 +258,7 @@ inline static instruction toOppositeBranch(instruction ins)
 public:
 void emitIns(instruction ins);
 
-void emitIns_J(BasicBlock* dst, ssize_t instrCount = 0);
+void emitIns_J(instruction ins, BasicBlock* dst, ssize_t instrCount = 0, register reg1 = REG_ZERO, register reg2 = REG_ZERO);
 void emitIns_J_cond(instruction ins, BasicBlock* dst, regNumber reg1, regNumber reg2 = REG_ZERO, ssize_t imm = 0);
 
 void emitIns_S_R(instruction ins, emitAttr attr, regNumber ireg, int varx, int offs);

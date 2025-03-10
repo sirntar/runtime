@@ -50,6 +50,20 @@ const emitJumpKind emitReverseJumpKinds[] = {
     return emitJumpKindInstructions[jumpKind];
 }
 
+/*static*/ emitJumpKind emitter::emitInsToJumpKind(instruction ins)
+{
+    for (unsigned i = 0; i < ArrLen(emitJumpKindInstructions); i++)
+    {
+        if (ins == emitJumpKindInstructions[i])
+        {
+            emitJumpKind ret = (emitJumpKind)i;
+            assert(EJ_NONE < ret && ret < EJ_COUNT);
+            return ret;
+        }
+    }
+    unreached();
+}
+
 /*****************************************************************************
  * Reverse the conditional jump
  */
@@ -1160,8 +1174,27 @@ void emitter::emitIns_R_L(instruction ins, emitAttr attr, BasicBlock* dst, regNu
  * Emit short jump instruction (j/jal) (up to ~1MB forward and 1MB backward)
  *
  */
-void emitter::emitIns_J(BasicBlock* dst, ssize_t instrCount)
+void emitter::emitIns_J(instruction ins, BasicBlock* dst, ssize_t instrCount, register reg1, register reg2)
 {
+    switch(ins)
+    {
+        case INS_j:
+        case INS_jal:
+            break;
+        case INS_jalr:
+            return; //emitIns_R_R_I(INS_jalr, )
+        case INS_beq:
+        case INS_bne:
+        case INS_blt:
+        case INS_bge:
+        case INS_bltu:
+        case INS_bltu:
+        // C extension
+        case INS_beqz:
+        case INS_bnez:
+            return emitIns_J_cond(ins, dst, reg1, reg2, instrCount);
+    }
+
     if (dst != nullptr)
     {
         assert(dst->HasFlag(BBF_HAS_LABEL));
@@ -3195,11 +3228,21 @@ BYTE* emitter::emitOutputInstr_OptsJCond(BYTE* dst, instrDesc* id, const insGrou
 
     if (!emitter::isValidSimm12(immediate))
     {
-        *ins = emitter::toOppositeBranch(*ins);
+        *ins =  emitter::reverseBranchIns(*ins);
 
         const regNumber rsvdReg = codeGen->rsGetRsvdReg();
         const ssize_t   high    = UpperWordOfDoubleWordSingleSignExtend<0>(immediate);
         const ssize_t   low     = LowerWordOfDoubleWord(immediate);
+
+        // ~ins ------
+        //            |
+        // auipc      |
+        // jalr ------|----
+        //            |    |
+        // nop <------     |
+        // (...)           |
+        // (...)           |
+        // nop <-----------
 
         if (!high)
         {
@@ -3223,17 +3266,6 @@ BYTE* emitter::emitOutputInstr_OptsJCond(BYTE* dst, instrDesc* id, const insGrou
     }
     else
     {
-
-        // bneq ------
-        //            |
-        // auipc      |
-        // jalr ------|----
-        //            |    |
-        // nop <------     |
-        // (...)           |
-        // (...)           |
-        // nop <-----------
-
         dst += emitOutput_BTypeInstr(dst, *ins, id->idReg1(), id->idReg2(), TrimSignedToImm13(immediate));
     }
     return dst;
