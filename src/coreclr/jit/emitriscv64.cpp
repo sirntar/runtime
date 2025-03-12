@@ -51,6 +51,26 @@ const emitJumpKind emitReverseJumpKinds[] = {
 }
 
 /*****************************************************************************
+ * Look up the (conditional) jump kind for an instruction.
+ */
+
+/*static*/ emitJumpKind emitter::emitInsToJumpKind(instruction ins)
+{
+    assert(emitter::isCondJumpInstruction(ins));
+
+    for (unsigned i = 0; i < ArrLen(emitJumpKindInstructions); i++)
+    {
+        if (ins == emitJumpKindInstructions[i])
+        {
+            emitJumpKind ret = (emitJumpKind)i;
+            assert(EJ_NONE < ret && ret < EJ_COUNT);
+            return ret;
+        }
+    }
+    unreached();
+}
+
+/*****************************************************************************
  * Reverse the conditional jump
  */
 
@@ -58,6 +78,23 @@ const emitJumpKind emitReverseJumpKinds[] = {
 {
     assert(jumpKind < EJ_COUNT);
     return emitReverseJumpKinds[jumpKind];
+}
+
+/*****************************************************************************
+ * Reverse the conditional jump instruction
+ */
+
+/*static*/ instruction emitter::emitReverseJumpIns(instruction ins)
+{
+    assert(emitter::isCondJumpInstruction(ins));
+
+    return emitJumpKindToIns(
+        emitReverseJumpKind(
+            emitInsToJumpKind(
+                ins
+            )
+        )
+    );
 }
 
 /*****************************************************************************
