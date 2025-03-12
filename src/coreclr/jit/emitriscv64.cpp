@@ -74,6 +74,17 @@ const emitJumpKind emitReverseJumpKinds[] = {
     return emitReverseJumpKinds[jumpKind];
 }
 
+/*static*/ instruction emitter::emitReverseJumpIns(instruction ins)
+{
+    return emitJumpKindToIns(
+        emitReverseJumpKind(
+            emitInsToJumpKind(
+                ins
+            )
+        )
+    );
+}
+
 /*****************************************************************************
  *
  *  Return the allocated size (in bytes) of the given instruction descriptor.
@@ -744,21 +755,21 @@ void emitter::emitIns_R_R_I(
         code |= reg2 << 15;                                        // rs1
         code |= (((imm >> 5) & 0x7f) << 25) | ((imm & 0x1f) << 7); // imm
     }
-    else if (INS_beq <= ins && INS_bgeu >= ins)
-    {
-        assert(isGeneralRegister(reg1));
-        assert(isGeneralRegister(reg2));
-        assert(isValidSimm13(imm));
-        assert(!(imm & 3));
-        code |= reg1 << 15;
-        code |= reg2 << 20;
-        code |= ((imm >> 11) & 0x1) << 7;
-        code |= ((imm >> 1) & 0xf) << 8;
-        code |= ((imm >> 5) & 0x3f) << 25;
-        code |= ((imm >> 12) & 0x1) << 31;
-        // TODO-RISCV64: Move jump logic to emitIns_J
-        id->idAddr()->iiaSetInstrCount(static_cast<int>(imm / sizeof(code_t)));
-    }
+    // else if (INS_beq <= ins && INS_bgeu >= ins)
+    // {
+    //     assert(isGeneralRegister(reg1));
+    //     assert(isGeneralRegister(reg2));
+    //     assert(isValidSimm13(imm));
+    //     assert(!(imm & 3));
+    //     code |= reg1 << 15;
+    //     code |= reg2 << 20;
+    //     code |= ((imm >> 11) & 0x1) << 7;
+    //     code |= ((imm >> 1) & 0xf) << 8;
+    //     code |= ((imm >> 5) & 0x3f) << 25;
+    //     code |= ((imm >> 12) & 0x1) << 31;
+    //     // TODO-RISCV64: Move jump logic to emitIns_J
+    //     id->idAddr()->iiaSetInstrCount(static_cast<int>(imm / sizeof(code_t)));
+    // }
     else if (ins == INS_csrrs || ins == INS_csrrw || ins == INS_csrrc)
     {
         assert(isGeneralRegisterOrR0(reg1));
@@ -1174,26 +1185,19 @@ void emitter::emitIns_R_L(instruction ins, emitAttr attr, BasicBlock* dst, regNu
  * Emit short jump instruction (j/jal) (up to ~1MB forward and 1MB backward)
  *
  */
-void emitter::emitIns_J(instruction ins, BasicBlock* dst, ssize_t instrCount, register reg1, register reg2)
+void emitter::emitIns_J(instruction ins, BasicBlock* dst, ssize_t instrCount, regNumber reg1, regNumber reg2)
 {
-    switch(ins)
+    if (ins == INS_jalr)
     {
-        case INS_j:
-        case INS_jal:
-            break;
-        case INS_jalr:
-            return; //emitIns_R_R_I(INS_jalr, )
-        case INS_beq:
-        case INS_bne:
-        case INS_blt:
-        case INS_bge:
-        case INS_bltu:
-        case INS_bltu:
-        // C extension
-        case INS_beqz:
-        case INS_bnez:
-            return emitIns_J_cond(ins, dst, reg1, reg2, instrCount);
+        assert(isValidSimm12(instrCount));
+        emitIns_R_R_I(INS_jalr, EA_4BYTE, reg1, reg2, instrCount);
     }
+    else if(isCondJumpInstruction(ins))
+    {
+        return emitIns_J_cond(ins, dst, reg1, reg2, instrCount); 
+    }
+
+    noway_assert(ins == INS_j || ins == INS_jal);
 
     if (dst != nullptr)
     {
@@ -1244,6 +1248,16 @@ void emitter::emitIns_J(instruction ins, BasicBlock* dst, ssize_t instrCount, re
     appendToCurIG(id);
 }
 
+// void emitter::emitIns_J_la(register reg1, register reg2, ssize_t imm, BasicBlock* dst)
+// {
+//     if (dst != nullptr)
+//     {
+//         assert(dst->HasFlag(BBF_HAS_LABEL));
+//     }
+
+
+// }
+
 /*****************************************************************************
  *
  * Emit conditional jump instruction (beq/bne/blt/bge/bltu/bgeu/beqz/bnez)
@@ -1256,15 +1270,15 @@ void emitter::emitIns_J_cond(instruction ins, BasicBlock* dst, regNumber reg1, r
 {
     if (dst != nullptr)
     {
-        assert(dst->HasFlag(BBF_HAS_LABEL));
+        assert(dst->HasFlag(BBF_HAS_LABEL) || dst->HasFlag(BBF_RETLESS_CALL));
     }
     else
     {
-        assert(instrCount != 0);
-        assert(assert(isValidSimm12(imm)));
+        assert(imm != 0);
+        assert(isValidSimm12(imm));
     }
 
-    assert(isCondJumpInstruction(ins), "Illegal instruction!");
+    assert(isCondJumpInstruction(ins));
     assert(isGeneralRegisterOrR0(reg1) && isGeneralRegisterOrR0(reg2));
 
     instrDescJmp* id = emitNewInstrJmp();
@@ -3228,7 +3242,7 @@ BYTE* emitter::emitOutputInstr_OptsJCond(BYTE* dst, instrDesc* id, const insGrou
 
     if (!emitter::isValidSimm12(immediate))
     {
-        *ins =  emitter::reverseBranchIns(*ins);
+        *ins = emitJumpKindToIns(emitReverseJumpKind(emitInsToJumpKind(*ins)));
 
         const regNumber rsvdReg = codeGen->rsGetRsvdReg();
         const ssize_t   high    = UpperWordOfDoubleWordSingleSignExtend<0>(immediate);
@@ -3248,7 +3262,7 @@ BYTE* emitter::emitOutputInstr_OptsJCond(BYTE* dst, instrDesc* id, const insGrou
         {
             dst += emitOutput_BTypeInstr(dst, *ins, id->idReg1(), id->idReg2(), TrimSignedToImm13(3 << 2));
 
-            dst += emitOutput_UTypeInstr(dst, INS_auipc, rsvdReg, UpperNBitsOfWordSignExtend<20>(low)
+            dst += emitOutput_UTypeInstr(dst, INS_auipc, rsvdReg, UpperNBitsOfWordSignExtend<20>(low));
             dst += emitOutput_ITypeInstr(dst, INS_jalr, REG_ZERO, rsvdReg, LowerNBitsOfWord<12>(low));
         }
         else
@@ -3273,11 +3287,11 @@ BYTE* emitter::emitOutputInstr_OptsJCond(BYTE* dst, instrDesc* id, const insGrou
 
 BYTE* emitter::emitOutputInstr_OptsJ(BYTE* dst, instrDesc* id, const insGroup* ig, instruction* ins)
 {
-    assert(id->idInsIs(INS_jal));
+    assert(id->idInsIs(INS_jal) || id->idInsIs(INS_j));
 
     ssize_t immediate = emitOutputInstrJumpDistance(dst, ig, static_cast<instrDescJmp*>(id));
 
-    assert(immediate >> 12);
+    assert(isValidSimm12(immediate));
 
     dst += emitOutput_JTypeInstr(dst, INS_jal, REG_ZERO, TrimSignedToImm21(immediate));
 
@@ -3363,6 +3377,8 @@ size_t emitter::emitOutputInstr(insGroup* ig, instrDesc* id, BYTE** dp)
             sz  = sizeof(instrDesc);
             break;
     }
+
+    // INS_OPTS_J --> invalid | why?
 
     // Determine if any registers now hold GC refs, or whether a register that was overwritten held a GC ref.
     // We assume here that "id->idGCref()" is not GC_NONE only if the instruction described by "id" writes a
@@ -5029,7 +5045,7 @@ regNumber emitter::emitInsTernary(instruction ins, emitAttr attr, GenTree* dst, 
                 {
                     // B > 0 and C > 0, if A < B, goto overflow
                     BasicBlock* tmpLabel = codeGen->genCreateTempLabel();
-                    emitIns_J_cond_la(INS_bge, tmpLabel, REG_R0, tempReg);
+                    emitIns_J_cond(INS_bge, tmpLabel, REG_R0, tempReg);
                     emitIns_R_R_I(INS_slti, EA_PTRSIZE, tempReg, dstReg, imm);
 
                     codeGen->genJumpToThrowHlpBlk_la(SCK_OVERFLOW, INS_bne, tempReg);
@@ -5040,7 +5056,7 @@ regNumber emitter::emitInsTernary(instruction ins, emitAttr attr, GenTree* dst, 
                 {
                     // B < 0 and C < 0, if A > B, goto overflow
                     BasicBlock* tmpLabel = codeGen->genCreateTempLabel();
-                    emitIns_J_cond_la(INS_bge, tmpLabel, tempReg, REG_R0);
+                    emitIns_J_cond(INS_bge, tmpLabel, tempReg, REG_R0);
                     emitIns_R_R_I(INS_addi, attr, tempReg, REG_R0, imm);
 
                     codeGen->genJumpToThrowHlpBlk_la(SCK_OVERFLOW, INS_blt, tempReg, nullptr, dstReg);

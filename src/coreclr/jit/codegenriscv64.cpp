@@ -1048,7 +1048,7 @@ BasicBlock* CodeGen::genCallFinally(BasicBlock* block)
 
     if (block->HasFlag(BBF_RETLESS_CALL))
     {
-        GetEmitter()->emitIns_J(block->GetTarget());
+        GetEmitter()->emitIns_J(INS_j, block->GetTarget());
 
         // We have a retless call, and the last instruction generated was a call.
         // If the next block is in a different EH region (or is the end of the code
@@ -1619,7 +1619,7 @@ void CodeGen::genLclHeap(GenTree* tree)
         // If 0 bail out by returning null in targetReg
         genConsumeRegAndCopy(size, targetReg);
         endLabel = genCreateTempLabel();
-        emit->emitIns_J_cond_la(INS_beq, endLabel, targetReg, REG_R0);
+        emit->emitIns_J_cond(INS_beq, endLabel, targetReg, REG_R0);
 
         // Compute the size of the block to allocate and perform alignment.
         // If compInitMem=true, we can reuse targetReg as regcnt,
@@ -2035,7 +2035,7 @@ void CodeGen::genCodeForDivMod(GenTreeOp* tree)
                 // Check if the divisor is not -1 branch to 'sdivLabel'
                 emit->emitIns_R_R_I(INS_addi, EA_PTRSIZE, tempReg, REG_ZERO, -1);
                 BasicBlock* sdivLabel = genCreateTempLabel(); // can optimize for riscv64.
-                emit->emitIns_J_cond_la(INS_bne, sdivLabel, tempReg, divisorReg);
+                emit->emitIns_J_cond(INS_bne, sdivLabel, tempReg, divisorReg);
 
                 // If control flow continues past here the 'divisorReg' is known to be -1
                 regNumber dividendReg = tree->gtGetOp1()->GetRegNum();
@@ -2880,7 +2880,7 @@ void CodeGen::genCodeForReturnTrap(GenTreeOp* tree)
     genConsumeRegs(data);
 
     BasicBlock* skipLabel = genCreateTempLabel();
-    GetEmitter()->emitIns_J_cond_la(INS_beq, skipLabel, data->GetRegNum(), REG_R0);
+    GetEmitter()->emitIns_J_cond(INS_beq, skipLabel, data->GetRegNum(), REG_R0);
 
     void*                 pAddr = nullptr;
     void*                 addr  = compiler->compGetHelperFtn(CORINFO_HELP_STOP_FOR_GC, &pAddr);
@@ -3327,7 +3327,7 @@ void CodeGen::genCodeForCompare(GenTreeOp* tree)
                 emit->emitIns_R_R_R(INS_or, EA_8BYTE, tempReg, targetReg, tempReg);
                 emit->emitIns_R_R_I(INS_andi, EA_8BYTE, tempReg, tempReg, 0x300);
                 emit->emitIns_R_R_I(INS_addi, EA_8BYTE, targetReg, REG_R0, 1);
-                emit->emitIns_J(INS_bnez, skipLabel, tempReg);
+                emit->emitIns_J_cond(INS_bnez, skipLabel, tempReg);
                 emit->emitIns_R_R_R(cmpSize == EA_4BYTE ? INS_feq_s : INS_feq_d, cmpSize, targetReg, regOp1, regOp2);
                 genDefineTempLabel(skipLabel);
             }
@@ -3372,7 +3372,7 @@ void CodeGen::genCodeForCompare(GenTreeOp* tree)
                 emit->emitIns_R_R_I(INS_andi, EA_8BYTE, tempReg, tempReg, 0x300);
                 emit->emitIns_R_R_I(INS_addi, EA_8BYTE, targetReg, REG_R0, 0);
                 BasicBlock* skipLabel = genCreateTempLabel();
-                emit->emitIns_J(INS_bnez, skipLabel, tempReg);
+                emit->emitIns_J_cond(INS_bnez, skipLabel, tempReg);
                 emit->emitIns_R_R_R(cmpSize == EA_4BYTE ? INS_feq_s : INS_feq_d, cmpSize, targetReg, regOp1, regOp2);
                 emit->emitIns_R_R_R(INS_sub, EA_8BYTE, targetReg, REG_R0, targetReg);
                 emit->emitIns_R_R_I(INS_addi, EA_8BYTE, targetReg, targetReg, 1);
@@ -3624,12 +3624,12 @@ void CodeGen::genCodeForJumpCompare(GenTreeOpCC* tree)
 
     emitter*    emit = GetEmitter();
     instruction ins  = INS_invalid;
-    int         regs = 0;
 
     GenCondition cond = tree->gtCondition;
 
     emitAttr  cmpSize = EA_ATTR(genTypeSize(op1Type));
     regNumber regOp1  = op1->GetRegNum();
+    regNumber regOp2  = REG_ZERO;
 
     if (op2->isContainedIntOrIImmed())
     {
@@ -3683,7 +3683,7 @@ void CodeGen::genCodeForJumpCompare(GenTreeOpCC* tree)
             instGen_Set_Reg_To_Imm(attr, REG_RA, imm,
                                    INS_FLAGS_DONT_CARE DEBUGARG(con->gtTargetHandle) DEBUGARG(con->gtFlags));
             regSet.verifyRegUsed(REG_RA);
-            regs = (int)REG_RA << 5;
+            regOp1 = REG_RA;
         }
         else
         {
@@ -3707,31 +3707,37 @@ void CodeGen::genCodeForJumpCompare(GenTreeOpCC* tree)
         switch (cond.GetCode())
         {
             case GenCondition::EQ:
-                regs |= ((int)regOp1);
+                regOp2 = regOp1;
                 ins = INS_beq;
                 break;
             case GenCondition::NE:
-                regs |= ((int)regOp1);
+                regOp2 = regOp1;
                 ins = INS_bne;
                 break;
             case GenCondition::UGE:
             case GenCondition::SGE:
-                regs |= ((int)regOp1);
+                regOp2 = regOp1;
                 ins = cond.IsUnsigned() ? INS_bgeu : INS_bge;
                 break;
             case GenCondition::UGT:
             case GenCondition::SGT:
-                regs = imm ? ((((int)regOp1) << 5) | (int)REG_RA) : (((int)regOp1) << 5);
+                if (imm)
+                {
+                    regOp2 = REG_RA;
+                }
                 ins  = cond.IsUnsigned() ? INS_bltu : INS_blt;
                 break;
             case GenCondition::ULT:
             case GenCondition::SLT:
-                regs |= ((int)regOp1);
+                regOp2 = regOp1;
                 ins = cond.IsUnsigned() ? INS_bltu : INS_blt;
                 break;
             case GenCondition::ULE:
             case GenCondition::SLE:
-                regs = imm ? ((((int)regOp1) << 5) | (int)REG_RA) : (((int)regOp1) << 5);
+                if (imm)
+                {
+                    regOp2 = REG_RA;
+                }
                 ins  = cond.IsUnsigned() ? INS_bgeu : INS_bge;
                 break;
             default:
@@ -3741,7 +3747,7 @@ void CodeGen::genCodeForJumpCompare(GenTreeOpCC* tree)
     }
     else
     {
-        regNumber regOp2 = op2->GetRegNum();
+        regOp2 = op2->GetRegNum();
         if (cmpSize == EA_4BYTE)
         {
             regNumber tmpRegOp1 = REG_RA;
@@ -3766,34 +3772,35 @@ void CodeGen::genCodeForJumpCompare(GenTreeOpCC* tree)
             regOp2 = tmpRegOp2;
         }
 
+        regNumber regTmp = REG_ZERO;
         switch (cond.GetCode())
         {
             case GenCondition::EQ:
-                regs = (((int)regOp1) << 5) | (int)regOp2;
                 ins  = INS_beq;
                 break;
             case GenCondition::NE:
-                regs = (((int)regOp1) << 5) | (int)regOp2;
                 ins  = INS_bne;
                 break;
             case GenCondition::UGE:
             case GenCondition::SGE:
-                regs = ((int)regOp1 | ((int)regOp2 << 5));
+                regTmp = regOp1;
+                regOp1 = regOp2;
+                regOp2 = regTmp;
                 ins  = cond.IsUnsigned() ? INS_bgeu : INS_bge;
                 break;
             case GenCondition::UGT:
             case GenCondition::SGT:
-                regs = (((int)regOp1) << 5) | (int)regOp2;
                 ins  = cond.IsUnsigned() ? INS_bltu : INS_blt;
                 break;
             case GenCondition::ULT:
             case GenCondition::SLT:
-                regs = ((int)regOp1 | ((int)regOp2 << 5));
+                regTmp = regOp1;
+                regOp1 = regOp2;
+                regOp2 = regTmp;
                 ins  = cond.IsUnsigned() ? INS_bltu : INS_blt;
                 break;
             case GenCondition::ULE:
             case GenCondition::SLE:
-                regs = (((int)regOp1) << 5) | (int)regOp2;
                 ins  = cond.IsUnsigned() ? INS_bgeu : INS_bge;
                 break;
             default:
@@ -3802,9 +3809,8 @@ void CodeGen::genCodeForJumpCompare(GenTreeOpCC* tree)
         }
     }
     assert(ins != INS_invalid);
-    assert(regs != 0);
 
-    emit->emitIns_J(ins, compiler->compCurBB->GetTrueTarget(), regs); // 5-bits;
+    emit->emitIns_J_cond(ins, compiler->compCurBB->GetTrueTarget(), regOp1, regOp2); // 5-bits;
 
     // If we cannot fall into the false target, emit a jump to it
     BasicBlock* falseTarget = compiler->compCurBB->GetFalseTarget();
@@ -4818,7 +4824,7 @@ void CodeGen::genEmitGSCookieCheck(bool pushReg)
 
     // Compare with the GC cookie constant
     BasicBlock* gsCheckBlk = genCreateTempLabel();
-    GetEmitter()->emitIns_J_cond_la(INS_beq, gsCheckBlk, regGSConst, regGSValue);
+    GetEmitter()->emitIns_J_cond(INS_beq, gsCheckBlk, regGSConst, regGSValue);
 
     // regGSConst and regGSValue aren't needed anymore, we can use them for helper call
     genEmitHelperCall(CORINFO_HELP_FAIL_FAST, 0, EA_UNKNOWN, regGSConst);
@@ -5961,7 +5967,7 @@ void CodeGen::genCodeForInitBlkLoop(GenTreeBlk* initBlkNode)
         // tempReg = tempReg - 8
         GetEmitter()->emitIns_R_R_I(INS_addi, EA_PTRSIZE, tempReg, tempReg, -8);
         // if (tempReg != dstReg) goto loop;
-        GetEmitter()->emitIns_J(INS_bne, loop, (int)tempReg | ((int)dstReg << 5));
+        GetEmitter()->emitIns_J(INS_bne, loop, tempReg, dstReg);
         GetEmitter()->emitEnableGC();
 
         gcInfo.gcMarkRegSetNpt(genRegMask(dstReg));
@@ -6983,7 +6989,7 @@ void CodeGen::genJumpToThrowHlpBlk_la(
         noway_assert(excpRaisingBlock != nullptr);
 
         // Jump to the exception-throwing block on error.
-        emit->emitIns_J(ins, excpRaisingBlock, (int)reg1 | ((int)reg2 << 5)); // 5-bits;
+        emit->emitIns_J(ins, excpRaisingBlock, reg1, reg2); // 5-bits;
     }
     else
     {
@@ -6995,8 +7001,7 @@ void CodeGen::genJumpToThrowHlpBlk_la(
         emitter::EmitCallType callType;
         regNumber             callTarget;
 
-        // on rv64 (in every extension) opposite comparisons are exactly 0x1000 apart
-        ins = ins & 0x1000 ? ins & ~0x1000 : ins | 0x1000;
+        ins = emitter::emitReverseJumpIns(ins);
 
         if (addr == nullptr)
         {

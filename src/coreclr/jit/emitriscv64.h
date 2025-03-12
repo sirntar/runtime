@@ -230,6 +230,7 @@ inline static bool isCondJumpInstruction(instruction ins)
         case INS_bge:
         case INS_bltu:
         case INS_bgeu:
+        // C extension
         case INS_beqz:
         case INS_bnez:
             return true;
@@ -244,21 +245,15 @@ inline static bool isJumpInstruction(instruction ins)
     return ins == INS_j || ins == INS_jal || ins == INS_jalr;
 }
 
-inline static instruction reverseBranchIns(instruction ins)
-{
-    assert(isCondJumpInstruction(ins));
-    // on rv64 (in every extension) opposite comparisons are exactly 0x1000 apart
-    return ins & 0x1000 ? ins & ~0x1000 : ins | 0x1000;
-}
-
 /************************************************************************/
 /*           The public entry points to output instructions             */
 /************************************************************************/
 
 public:
+static instruction emitReverseJumpIns(instruction ins);
 void emitIns(instruction ins);
 
-void emitIns_J(instruction ins, BasicBlock* dst, ssize_t instrCount = 0, register reg1 = REG_ZERO, register reg2 = REG_ZERO);
+void emitIns_J(instruction ins, BasicBlock* dst, ssize_t instrCount = 0, regNumber reg1 = REG_ZERO, regNumber reg2 = REG_ZERO);
 void emitIns_J_cond(instruction ins, BasicBlock* dst, regNumber reg1, regNumber reg2 = REG_ZERO, ssize_t imm = 0);
 
 void emitIns_S_R(instruction ins, emitAttr attr, regNumber ireg, int varx, int offs);
