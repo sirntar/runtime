@@ -568,6 +568,11 @@ void emitter::emitIns_I_I(instruction ins, emitAttr attr, ssize_t cc, ssize_t of
 
 void emitter::emitIns_R_I(instruction ins, emitAttr attr, regNumber reg, ssize_t imm, insOpts opt /* = INS_OPTS_NONE */)
 {
+    if (isJumpInstruction(ins))
+    {
+        return emitIns_J(ins, nullptr, imm, reg);
+    }
+
     code_t code = emitInsCode(ins);
 
     switch (ins)
@@ -580,16 +585,6 @@ void emitter::emitIns_R_I(instruction ins, emitAttr attr, regNumber reg, ssize_t
 
             code |= reg << 7;
             code |= (imm & 0xfffff) << 12;
-            break;
-        case INS_jal:
-            assert(isGeneralRegisterOrR0(reg));
-            assert(isValidSimm21(imm));
-
-            code |= reg << 7;
-            code |= ((imm >> 12) & 0xff) << 12;
-            code |= ((imm >> 11) & 0x1) << 20;
-            code |= ((imm >> 1) & 0x3ff) << 21;
-            code |= ((imm >> 20) & 0x1) << 31;
             break;
         default:
             NO_WAY("illegal ins within emitIns_R_I!");
@@ -758,11 +753,16 @@ void emitter::emitIns_R_R(
 void emitter::emitIns_R_R_I(
     instruction ins, emitAttr attr, regNumber reg1, regNumber reg2, ssize_t imm, insOpts opt /* = INS_OPTS_NONE */)
 {
+    if (isJumpInstruction(ins))
+    {
+        return emitIns_J(ins, nullptr, imm, reg1, reg2);
+    }
+
     code_t     code = emitInsCode(ins);
     instrDesc* id   = emitNewInstr(attr);
 
     if ((INS_addi <= ins && INS_srai >= ins) || (INS_addiw <= ins && INS_sraiw >= ins) ||
-        (INS_lb <= ins && INS_lhu >= ins) || INS_ld == ins || INS_lw == ins || INS_jalr == ins || INS_fld == ins ||
+        (INS_lb <= ins && INS_lhu >= ins) || INS_ld == ins || INS_lw == ins || INS_fld == ins ||
         INS_flw == ins)
     {
         assert(isGeneralRegister(reg2));
@@ -1219,19 +1219,64 @@ void emitter::emitIns_J(instruction ins, BasicBlock* dst, ssize_t instrCount, re
     {
         assert(dst->HasFlag(BBF_HAS_LABEL));
     }
-    else
-    {
-        assert(instrCount != 0);
-        assert(isValidSimm20(instrCount));
-    }
 
     instrDescJmp* id = emitNewInstrJmp();
     id->idIns(ins);
     id->idReg1(reg1);
     id->idReg2(reg2);
 
-    id->idInsOpt(INS_OPTS_J);
-    emitCounts_INS_OPTS_J++;
+    code_t code = emitInsCode(ins);
+
+    if (isCondJumpInstruction(ins))
+    {
+        assert(isGeneralRegister(reg1));
+        assert(isGeneralRegister(reg2));
+        assert(isValidSimm13(instrCount));
+
+        id->idInsOpt(INS_OPTS_J_cond);
+
+        code |= reg1 << 15;
+        code |= reg2 << 20;
+        code |= (instrCount & 0x1000) << (31 - 12); // imm[12] -> 31
+        code |= (instrCount & 0x7E0) << (25 - 5);   // imm[10:5] -> 30:25
+        code |= (instrCount & 0x1E) << (8 - 1);     // imm[4:1] -> 11:8
+        code |= (instrCount & 0x800) >> (11 - 7);   // imm[11] -> 7
+    }
+    else if(ins != INS_jalr)
+    {
+        assert(isValidSimm21(instrCount));
+
+        id->idInsOpt(INS_OPTS_J);
+
+        code |= (instrCount & 0x100000) << (31 - 20); // imm[20] -> 31
+        code |= (instrCount & 0x7FE) << (21 - 1);     // imm[10:1] -> 30:21
+        code |= (instrCount & 0x800) << (20 - 11);    // imm[11] -> 20
+        code |= (instrCount & 0xFF000) << (12 - 12);  // imm[19:12] -> 19:12
+        // code |= REG_ZERO << 7; // rd = REG_ZERO
+
+        if (emitComp->opts.compReloc)
+        {
+            id->idSetIsDspReloc();
+        }
+
+        id->idjShort = false;
+        // long jumps are only possible using auipc+jalr
+        id->idjKeepLong = false;
+    }
+    else // ins == INS_jalr
+    {
+        assert(isGeneralRegister(reg1));
+        assert(isGeneralRegister(reg2));
+        assert(isValidSimm12(instrCount));
+
+        id->idInsOpt(INS_OPTS_NONE);
+
+        code |= reg1 << 7; // rd
+        code |= reg2 << 15; // rs1
+        code |= instrCount << 20; // imm
+    }
+
+    id->idAddr()->iiaSetInstrEncode(code);
 
     if (dst != nullptr)
     {
@@ -1239,30 +1284,27 @@ void emitter::emitIns_J(instruction ins, BasicBlock* dst, ssize_t instrCount, re
     }
     else
     {
-        id->idAddr()->iiaSetInstrCount(instrCount);
+        id->idAddr()->iiaSetInstrCount(static_cast<int>(instrCount / sizeof(code_t)));
     }
 
-    if (emitComp->opts.compReloc)
+    // we shouldn't add jalr jumps to IG's jump list,
+    // bacause only relative (to pc) jumps are stored there
+    if (ins != INS_jalr)
     {
-        id->idSetIsDspReloc();
-    }
+        emitCounts_INS_OPTS_J++; // this includes short conditional jumps
 
-    id->idjShort = false;
+        // Record the jump's IG and offset within it
+        id->idjIG   = emitCurIG;
+        id->idjOffs = emitCurIGsize;
 
-    // long jumps are only possible using auipc+jalr
-    id->idjKeepLong = false;
-
-    // Record the jump's IG and offset within it
-    id->idjIG   = emitCurIG;
-    id->idjOffs = emitCurIGsize;
-
-    // Append this jump to this IG's jump list
-    id->idjNext      = emitCurIGjmpList;
-    emitCurIGjmpList = id;
+        // Append this jump to this IG's jump list
+        id->idjNext      = emitCurIGjmpList;
+        emitCurIGjmpList = id;
 
 #if EMITTER_STATS
-    emitTotalIGjmps++;
+        emitTotalIGjmps++;
 #endif
+    }
 
     id->idCodeSize(4);
 
