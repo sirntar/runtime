@@ -1213,22 +1213,34 @@ void emitter::emitIns_J_R(instruction ins, emitAttr attr, BasicBlock* dst, regNu
 
 void emitter::emitIns_J(instruction ins, BasicBlock* dst, ssize_t instrCount, regNumber reg1, regNumber reg2)
 {
-    assert(dst != nullptr);
-    //
-    // INS_OPTS_J: placeholders.  1-ins: if the dst outof-range will be replaced by INS_OPTS_JALR.
-    // jal/j/jalr/bnez/beqz/beq/bne/blt/bge/bltu/bgeu dst
+    assert(isCondJumpInstruction(ins) || isJumpInstruction(ins));
 
-    assert(dst->HasFlag(BBF_HAS_LABEL));
+    if (dst != nullptr)
+    {
+        assert(dst->HasFlag(BBF_HAS_LABEL));
+    }
+    else
+    {
+        assert(instrCount != 0);
+        assert(isValidSimm20(instrCount));
+    }
 
     instrDescJmp* id = emitNewInstrJmp();
-    assert((INS_jal <= ins) && (ins <= INS_bgeu));
     id->idIns(ins);
     id->idReg1(reg1);
     id->idReg2(reg2);
 
     id->idInsOpt(INS_OPTS_J);
     emitCounts_INS_OPTS_J++;
-    id->idAddr()->iiaBBlabel = dst;
+
+    if (dst != nullptr)
+    {
+        id->idAddr()->iiaBBlabel = dst;
+    }
+    else
+    {
+        id->idAddr()->iiaSetInstrCount(instrCount);
+    }
 
     if (emitComp->opts.compReloc)
     {
@@ -1237,18 +1249,14 @@ void emitter::emitIns_J(instruction ins, BasicBlock* dst, ssize_t instrCount, re
 
     id->idjShort = false;
 
-    // TODO-RISCV64: maybe deleted this.
-    id->idjKeepLong = emitComp->fgInDifferentRegions(emitComp->compCurBB, dst);
-#ifdef DEBUG
-    if (emitComp->opts.compLongAddress) // Force long branches
-        id->idjKeepLong = 1;
-#endif // DEBUG
+    // long jumps are only possible using auipc+jalr
+    id->idjKeepLong = false;
 
-    /* Record the jump's IG and offset within it */
+    // Record the jump's IG and offset within it
     id->idjIG   = emitCurIG;
     id->idjOffs = emitCurIGsize;
 
-    /* Append this jump to this IG's jump list */
+    // Append this jump to this IG's jump list
     id->idjNext      = emitCurIGjmpList;
     emitCurIGjmpList = id;
 
