@@ -1211,7 +1211,7 @@ void emitter::emitIns_J_R(instruction ins, emitAttr attr, BasicBlock* dst, regNu
     NYI_RISCV64("emitIns_J_R-----unimplemented/unused on RISCV64 yet----");
 }
 
-void emitter::emitIns_J(instruction ins, BasicBlock* dst, int instrCount)
+void emitter::emitIns_J(instruction ins, BasicBlock* dst, ssize_t instrCount, regNumber reg1, regNumber reg2)
 {
     assert(dst != nullptr);
     //
@@ -1223,8 +1223,8 @@ void emitter::emitIns_J(instruction ins, BasicBlock* dst, int instrCount)
     instrDescJmp* id = emitNewInstrJmp();
     assert((INS_jal <= ins) && (ins <= INS_bgeu));
     id->idIns(ins);
-    id->idReg1((regNumber)(instrCount & 0x1f));
-    id->idReg2((regNumber)((instrCount >> 5) & 0x1f));
+    id->idReg1(reg1);
+    id->idReg2(reg2);
 
     id->idInsOpt(INS_OPTS_J);
     emitCounts_INS_OPTS_J++;
