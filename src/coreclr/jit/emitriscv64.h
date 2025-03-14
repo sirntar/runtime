@@ -130,8 +130,8 @@ BYTE* emitOutputInstr_OptsJalr(BYTE* dst, instrDescJmp* jmp, const insGroup* ig,
 BYTE* emitOutputInstr_OptsJalr8(BYTE* dst, const instrDescJmp* jmp, ssize_t immediate);
 BYTE* emitOutputInstr_OptsJalr24(BYTE* dst, ssize_t immediate);
 BYTE* emitOutputInstr_OptsJalr28(BYTE* dst, const instrDescJmp* jmp, ssize_t immediate);
-BYTE* emitOutputInstr_OptsJCond(BYTE* dst, instrDesc* id, const insGroup* ig, instruction* ins);
-BYTE* emitOutputInstr_OptsJ(BYTE* dst, instrDesc* id, const insGroup* ig, instruction* ins);
+BYTE* emitOutputInstr_OptsJCond(BYTE* dst, instrDescJmp* id, const insGroup* ig, instruction* ins);
+BYTE* emitOutputInstr_OptsJ(BYTE* dst, instrDescJmp* id, const insGroup* ig, instruction* ins);
 BYTE* emitOutputInstr_OptsC(BYTE* dst, instrDesc* id, const insGroup* ig, size_t* size);
 
 static unsigned TrimSignedToImm12(ssize_t imm12);

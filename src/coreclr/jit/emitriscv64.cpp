@@ -1225,7 +1225,7 @@ void emitter::emitIns_J(instruction ins, BasicBlock* dst, ssize_t instrCount, re
     id->idReg1(reg1);
     id->idReg2(reg2);
 
-    code_t code = emitInsCode(ins);
+    code_t code = 0;
 
     if (isCondJumpInstruction(ins))
     {
@@ -1233,7 +1233,7 @@ void emitter::emitIns_J(instruction ins, BasicBlock* dst, ssize_t instrCount, re
         assert(isGeneralRegister(reg2));
         assert(isValidSimm13(instrCount));
 
-        id->idInsOpt(INS_OPTS_J_cond);
+        id->idInsOpt(INS_OPTS_J_cond); // TODO: TODO
 
         code |= reg1 << 15;
         code |= reg2 << 20;
@@ -1248,11 +1248,7 @@ void emitter::emitIns_J(instruction ins, BasicBlock* dst, ssize_t instrCount, re
 
         id->idInsOpt(INS_OPTS_J);
 
-        code |= (instrCount & 0x100000) << (31 - 20); // imm[20] -> 31
-        code |= (instrCount & 0x7FE) << (21 - 1);     // imm[10:1] -> 30:21
-        code |= (instrCount & 0x800) << (20 - 11);    // imm[11] -> 20
-        code |= (instrCount & 0xFF000) << (12 - 12);  // imm[19:12] -> 19:12
-        // code |= REG_ZERO << 7; // rd = REG_ZERO
+        // encoded in ::insEncodeJTypeInstr
 
         if (emitComp->opts.compReloc)
         {
@@ -1269,7 +1265,9 @@ void emitter::emitIns_J(instruction ins, BasicBlock* dst, ssize_t instrCount, re
         assert(isGeneralRegister(reg2));
         assert(isValidSimm12(instrCount));
 
-        id->idInsOpt(INS_OPTS_NONE);
+        id->idInsOpt(INS_OPTS_JALR);
+
+        code = emitInsCode(ins);
 
         code |= reg1 << 7; // rd
         code |= reg2 << 15; // rs1
@@ -2475,24 +2473,20 @@ static inline void assertCodeLength(size_t code, uint8_t size)
 
 /*static*/ emitter::code_t emitter::insEncodeJTypeInstr(unsigned opcode, unsigned rd, unsigned imm21)
 {
-    static constexpr unsigned kHiSectionMask = 0x3ff; // 0b1111111111
-    static constexpr unsigned kLoSectionMask = 0xff;  // 0b11111111
-    static constexpr unsigned kBitMask       = 0x01;
-
     assertCodeLength(opcode, 7);
     assertCodeLength(rd, 5);
     // This assert may be triggered by the untrimmed signed integers. Please refer to the TrimSigned helpers
     assertCodeLength(imm21, 21);
     assert((imm21 & 0x01) == 0);
 
-    unsigned imm20          = imm21 >> 1;
-    unsigned imm20HiSection = imm20 & kHiSectionMask;
-    unsigned imm20HiBit     = (imm20 >> 19) & kBitMask;
-    unsigned imm20LoSection = (imm20 >> 11) & kLoSectionMask;
-    unsigned imm20LoBit     = (imm20 >> 10) & kBitMask;
+    code_t code = opcode;
+    code |= (imm21 & 0x100000) << (31 - 20); // imm[20] -> 31
+    code |= (imm21 & 0x7FE) << (21 - 1);     // imm[10:1] -> 30:21
+    code |= (imm21 & 0x800) << (20 - 11);    // imm[11] -> 20
+    code |= (imm21 & 0xFF000) << (12 - 12);  // imm[19:12] -> 19:12
+    code |= rd << 7;
 
-    return opcode | (rd << 7) | (imm20LoSection << 12) | (imm20LoBit << 20) | (imm20HiSection << 21) |
-           (imm20HiBit << 31);
+    return code;
 }
 
 static constexpr unsigned kInstructionOpcodeMask = 0x7f;
@@ -3169,22 +3163,20 @@ BYTE* emitter::emitOutputInstr_OptsRlNoReloc(BYTE* dst, ssize_t igOffs, regNumbe
 
 BYTE* emitter::emitOutputInstr_OptsJalr(BYTE* dst, instrDescJmp* jmp, const insGroup* ig, instruction* ins)
 {
-    const ssize_t immediate = emitOutputInstrJumpDistance(dst, ig, jmp) - 4;
-    assert((immediate & 0x03) == 0);
-
     *ins = jmp->idIns();
+
     switch (jmp->idCodeSize())
     {
         case 8:
-            return emitOutputInstr_OptsJalr8(dst, jmp, immediate);
+            return emitOutputInstr_OptsJalr8(dst, jmp, emitOutputInstrJumpDistance(dst, ig, jmp) - 4);
         case 24:
             assert(jmp->idInsIs(INS_jal, INS_j));
-            return emitOutputInstr_OptsJalr24(dst, immediate);
+            return emitOutputInstr_OptsJalr24(dst, emitOutputInstrJumpDistance(dst, ig, jmp) - 4);
         case 28:
-            return emitOutputInstr_OptsJalr28(dst, jmp, immediate);
-        default:
-            // case 0 - 4: The original INS_OPTS_JALR: not used by now!!!
-            break;
+            return emitOutputInstr_OptsJalr28(dst, jmp, emitOutputInstrJumpDistance(dst, ig, jmp) - 4);
+        default: // original INS_OPTS_JALR
+            dst += emitOutput_Instr(dst, jmp->idAddr()->iiaGetInstrEncode());
+            return dst;
     }
     unreached();
     return nullptr;
@@ -3192,6 +3184,7 @@ BYTE* emitter::emitOutputInstr_OptsJalr(BYTE* dst, instrDescJmp* jmp, const insG
 
 BYTE* emitter::emitOutputInstr_OptsJalr8(BYTE* dst, const instrDescJmp* jmp, ssize_t immediate)
 {
+    assert((immediate & 0x03) == 0);
     const regNumber reg2 = jmp->idInsIs(INS_beqz, INS_bnez) ? REG_R0 : jmp->idReg2();
 
     dst += emitOutput_BTypeInstr_InvertComparation(dst, jmp->idIns(), jmp->idReg1(), reg2, 0x8);
@@ -3201,6 +3194,7 @@ BYTE* emitter::emitOutputInstr_OptsJalr8(BYTE* dst, const instrDescJmp* jmp, ssi
 
 BYTE* emitter::emitOutputInstr_OptsJalr24(BYTE* dst, ssize_t immediate)
 {
+    assert((immediate & 0x03) == 0);
     // Make target address with offset, then jump (JALR) with the target address
     immediate -= 2 * 4;
     const ssize_t high = UpperWordOfDoubleWordSingleSignExtend<0>(immediate);
@@ -3221,6 +3215,7 @@ BYTE* emitter::emitOutputInstr_OptsJalr24(BYTE* dst, ssize_t immediate)
 
 BYTE* emitter::emitOutputInstr_OptsJalr28(BYTE* dst, const instrDescJmp* jmp, ssize_t immediate)
 {
+    assert((immediate & 0x03) == 0);
     regNumber reg2 = jmp->idInsIs(INS_beqz, INS_bnez) ? REG_R0 : jmp->idReg2();
 
     dst += emitOutput_BTypeInstr_InvertComparation(dst, jmp->idIns(), jmp->idReg1(), reg2, 0x1c);
@@ -3228,9 +3223,9 @@ BYTE* emitter::emitOutputInstr_OptsJalr28(BYTE* dst, const instrDescJmp* jmp, ss
     return emitOutputInstr_OptsJalr24(dst, immediate);
 }
 
-BYTE* emitter::emitOutputInstr_OptsJCond(BYTE* dst, instrDesc* id, const insGroup* ig, instruction* ins)
+BYTE* emitter::emitOutputInstr_OptsJCond(BYTE* dst, instrDescJmp* id, const insGroup* ig, instruction* ins)
 {
-    const ssize_t immediate = emitOutputInstrJumpDistance(dst, ig, static_cast<instrDescJmp*>(id));
+    const ssize_t immediate = emitOutputInstrJumpDistance(dst, ig, id);
 
     *ins = id->idIns();
 
@@ -3238,9 +3233,9 @@ BYTE* emitter::emitOutputInstr_OptsJCond(BYTE* dst, instrDesc* id, const insGrou
     return dst;
 }
 
-BYTE* emitter::emitOutputInstr_OptsJ(BYTE* dst, instrDesc* id, const insGroup* ig, instruction* ins)
+BYTE* emitter::emitOutputInstr_OptsJ(BYTE* dst, instrDescJmp* id, const insGroup* ig, instruction* ins)
 {
-    const ssize_t immediate = emitOutputInstrJumpDistance(dst, ig, static_cast<instrDescJmp*>(id));
+    const ssize_t immediate = emitOutputInstrJumpDistance(dst, ig, id);
     assert((immediate & 0x03) == 0);
 
     *ins = id->idIns();
@@ -3331,12 +3326,11 @@ size_t emitter::emitOutputInstr(insGroup* ig, instrDesc* id, BYTE** dp)
             sz  = sizeof(instrDescJmp);
             break;
         case INS_OPTS_J_cond:
-            dst = emitOutputInstr_OptsJCond(dst, id, ig, &ins);
+            dst = emitOutputInstr_OptsJCond(dst, static_cast<instrDescJmp*>(id), ig, &ins);
             sz  = sizeof(instrDescJmp);
             break;
         case INS_OPTS_J:
-            // jal/j/jalr/bnez/beqz/beq/bne/blt/bge/bltu/bgeu dstRW-relative.
-            dst = emitOutputInstr_OptsJ(dst, id, ig, &ins);
+            dst = emitOutputInstr_OptsJ(dst, static_cast<instrDescJmp*>(id), ig, &ins);
             sz  = sizeof(instrDescJmp);
             break;
         case INS_OPTS_C:
