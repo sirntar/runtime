@@ -2438,26 +2438,23 @@ static inline void assertCodeLength(size_t code, uint8_t size)
 /*static*/ emitter::code_t emitter::insEncodeBTypeInstr(
     unsigned opcode, unsigned funct3, unsigned rs1, unsigned rs2, unsigned imm13)
 {
-    static constexpr unsigned kLoSectionMask = 0x0f; // 0b00001111
-    static constexpr unsigned kHiSectionMask = 0x3f; // 0b00111111
-    static constexpr unsigned kBitMask       = 0x01;
-
     assertCodeLength(opcode, 7);
     assertCodeLength(funct3, 3);
     assertCodeLength(rs1, 5);
     assertCodeLength(rs2, 5);
-    // This assert may be triggered by the untrimmed signed integers. Please refer to the TrimSigned helpers
     assertCodeLength(imm13, 13);
-    assert((imm13 & 0x01) == 0);
 
-    unsigned imm12          = imm13 >> 1;
-    unsigned imm12LoSection = imm12 & kLoSectionMask;
-    unsigned imm12LoBit     = (imm12 >> 10) & kBitMask;
-    unsigned imm12HiSection = (imm12 >> 4) & kHiSectionMask;
-    unsigned imm12HiBit     = (imm12 >> 11) & kBitMask;
+    code_t code = opcode;
 
-    return opcode | (imm12LoBit << 7) | (imm12LoSection << 8) | (funct3 << 12) | (rs1 << 15) | (rs2 << 20) |
-           (imm12HiSection << 25) | (imm12HiBit << 31);
+    code |= (imm13 & 0x1000) << 19; // imm[12] -> 31
+    code |= (imm13 & 0x7E0) << 20;  // imm[10:5] -> 30:25
+    code |= (imm13 & 0x1E) << 7;    // imm[4:1] -> 11:8
+    code |= (imm13 & 0x800) >> 4;   // imm[11] -> 7
+    code |= funct3 << 12;           // funct3 -> 14:12
+    code |= rs1 << 15;              // rs1 -> 19:15
+    code |= rs2 << 20;              // rs2 -> 24:20
+
+    return code;
 }
 
 /*****************************************************************************
@@ -2475,15 +2472,14 @@ static inline void assertCodeLength(size_t code, uint8_t size)
 {
     assertCodeLength(opcode, 7);
     assertCodeLength(rd, 5);
-    // This assert may be triggered by the untrimmed signed integers. Please refer to the TrimSigned helpers
     assertCodeLength(imm21, 21);
-    assert((imm21 & 0x01) == 0);
 
     code_t code = opcode;
-    code |= (imm21 & 0x100000) << (31 - 20); // imm[20] -> 31
-    code |= (imm21 & 0x7FE) << (21 - 1);     // imm[10:1] -> 30:21
-    code |= (imm21 & 0x800) << (20 - 11);    // imm[11] -> 20
-    code |= (imm21 & 0xFF000) << (12 - 12);  // imm[19:12] -> 19:12
+
+    code |= (imm21 & 0x100000) << 11; // imm[20] -> 31
+    code |= (imm21 & 0x7FE) << 20;    // imm[10:1] -> 30:21
+    code |= (imm21 & 0x800) << 9;     // imm[11] -> 20
+    code |= imm21 & 0xFF000;          // imm[19:12] -> 19:12
     code |= rd << 7;
 
     return code;
