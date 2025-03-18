@@ -2387,9 +2387,6 @@ static inline void assertCodeLength(size_t code, uint8_t size)
 /*static*/ emitter::code_t emitter::insEncodeSTypeInstr(
     unsigned opcode, unsigned funct3, unsigned rs1, unsigned rs2, unsigned imm12)
 {
-    static constexpr unsigned kLoMask = 0x1f; // 0b00011111
-    static constexpr unsigned kHiMask = 0x7f; // 0b01111111
-
     assertCodeLength(opcode, 7);
     assertCodeLength(funct3, 3);
     assertCodeLength(rs1, 5);
@@ -2397,10 +2394,15 @@ static inline void assertCodeLength(size_t code, uint8_t size)
     // This assert may be triggered by the untrimmed signed integers. Please refer to the TrimSigned helpers
     assertCodeLength(imm12, 12);
 
-    unsigned imm12Lo = imm12 & kLoMask;
-    unsigned imm12Hi = (imm12 >> 5) & kHiMask;
+    code_t code = opcode;
 
-    return opcode | (imm12Lo << 7) | (funct3 << 12) | (rs1 << 15) | (rs2 << 20) | (imm12Hi << 25);
+    code |= (imm12 & 0xFE0) << 20; // imm[11:5] -> 31:25
+    code |= rs2 << 20;             // rs2 -> 24:20
+    code |= rs1 << 15;             // rs1 -> 19:15
+    code |= funct3 << 12;          // funct3 -> 14:12
+    code |= (imm12 & 0x1F) << 7;   // imm[4:0] -> 11:7
+
+    return code;
 }
 
 /*****************************************************************************
@@ -2442,6 +2444,7 @@ static inline void assertCodeLength(size_t code, uint8_t size)
     assertCodeLength(funct3, 3);
     assertCodeLength(rs1, 5);
     assertCodeLength(rs2, 5);
+    // This assert may be triggered by the untrimmed signed integers. Please refer to the TrimSigned helpers
     assertCodeLength(imm13, 13);
 
     code_t code = opcode;
@@ -2472,6 +2475,7 @@ static inline void assertCodeLength(size_t code, uint8_t size)
 {
     assertCodeLength(opcode, 7);
     assertCodeLength(rd, 5);
+    // This assert may be triggered by the untrimmed signed integers. Please refer to the TrimSigned helpers
     assertCodeLength(imm21, 21);
 
     code_t code = opcode;
